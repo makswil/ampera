@@ -1,0 +1,13 @@
+# White-balance inference config (inference-only parameters).
+
+data:
+  image_size: 256   # internal model resolution (do not change)
+
+augmentation:
+  kelvin_min: 2700  # warmest training temperature
+  kelvin_max: 8500  # coolest training temperature
+
+model:
+  base_channels: 16 # must match the checkpoint
+
+device: "auto"      # auto -> CUDA -> MPS -> CPU
