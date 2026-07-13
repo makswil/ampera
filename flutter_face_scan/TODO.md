@@ -1,21 +1,44 @@
 # TODO — flutter_face_scan
 
-## Deferred
+## Hi-res texture via AVCapture (registered) — main feature
 
-- **Higher-resolution source photo.** The bake's detail ceiling is the ARKit video
-  frame (~1–2 MP), not the texture size. Options, best first:
-  1. `ARSession.captureHighResolutionFrame` (iOS 16+): grab a hi-res still mid-
-     session, mesh stays synced. Only if a `videoFormat` reports
-     `isRecommendedForHighResolutionFrameCapturing` — may be unsupported for
-     `ARFaceTrackingConfiguration`; needs on-device check.
-  2. Separate `AVCapturePhoto` session: true full-res, but competes with ARKit
-     for the camera and loses exact mesh/time sync. Messy.
+Sharp color texture is the biggest visual win. Source photo res is the lever
+(depth/normal-map only adds geometric relief, not texture sharpness).
 
-- **Depth normal map.** Bake a normal/displacement map from the TrueDepth depth
-  frame for micro-relief (pores, wrinkles), independent of RGB resolution. Needs
-  capturing the depth frame natively. The real fidelity lever.
+- Front camera **still photo** = 3088×2316 (7 MP). ARKit **face-tracking video**
+  = 1440×1080 (1.5 MP). `captureHighResolutionFrame` is NOT offered for face
+  tracking (HUD `hi-res cap: no`) → only path is a separate AVCapture session.
+
+**Approach:** during the 2.5s hold (head stable, cancel-on-movement already
+guards drift), grab the ARKit mesh + view/projection matrices, then pause ARKit
+→ `AVCapturePhoto` (max res) → resume ARKit.
+
+**Registration:** ARKit's `projectionMatrix` is resolution-independent (encodes
+FOV, not pixels). Same lens → same FOV; both 4:3. So project the mesh with
+ARKit's `view·projection` and map NDC onto the 7 MP photo grid → sharp registered
+texture, no low-res sampling.
+- Camera intrinsics are available on-device (`AVCameraCalibrationData`). Use ONLY
+  if AVCapture's FOV/crop differs from ARKit's video format (verify on-device).
+  If it matches, no correction — just map correctly.
+- Optional: align the low-res ARKit frame ↔ hi-res photo only if it actually
+  helps; skip otherwise.
+- Handle front-camera mirroring / orientation.
+
+**Settings — variant toggle (required):** "Texture source: ARKit video (stable)
+| AVCapture hi-res". Lets the user switch back to the working ARKit path by one
+tap if the AVCapture variant misbehaves — app stays usable.
+
+**Risks:** camera-switch preview freeze (~100s ms) at capture; FOV/crop mismatch;
+ARKit resume continuity between poses.
+
+## Depth normal map — secondary
+
+Normal/displacement map from the TrueDepth depth frame for geometric relief
+(meso-structure). Depth sensor is coarse → no fine pores; complements the photo,
+not a sharpness replacement. Needs capturing the depth frame natively.
 
 ## Notes
 
-- Texture resolution: 2048 already exceeds the ARKit RGB source; 4096 only
-  upsamples. Keep 2048.
+- Texture resolution is always source/original (both < 4096); the manual
+  resolution setting was removed. ARKit video 1.5 MP and the 7 MP photo both fit
+  a 4096² atlas.

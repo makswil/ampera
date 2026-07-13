@@ -15,20 +15,13 @@ class DebugSettings extends ChangeNotifier {
     bool? showHud,
     bool? showMesh,
     bool? fillHoles,
-    int? textureSize,
   }) : _showHud = showHud ?? kCaptureDebugHud,
        _showMesh = showMesh ?? kFaceMeshOverlay,
-       _fillHoles = fillHoles ?? true,
-       _textureSize = textureSize ?? 2048;
-
-  /// Selectable bake texture resolutions (px). `0` = Original (match the source
-  /// photo). Higher fixed sizes only add real detail up to the source photo.
-  static const List<int> textureSizeOptions = <int>[1024, 2048, 4096, 0];
+       _fillHoles = fillHoles ?? true;
 
   bool _showHud;
   bool _showMesh;
   bool _fillHoles;
-  int _textureSize;
 
   bool get showHud => _showHud;
   bool get showMesh => _showMesh;
@@ -54,16 +47,6 @@ class DebugSettings extends ChangeNotifier {
   set fillHoles(bool value) {
     if (value != _fillHoles) {
       _fillHoles = value;
-      notifyListeners();
-    }
-  }
-
-  /// Bake texture resolution (px, square).
-  int get textureSize => _textureSize;
-
-  set textureSize(int value) {
-    if (value != _textureSize) {
-      _textureSize = value;
       notifyListeners();
     }
   }

@@ -143,25 +143,6 @@ class _CapturePageState extends State<CapturePage> {
                   value: _debug.fillHoles,
                   onChanged: (bool v) => _debug.fillHoles = v,
                 ),
-                ListTile(
-                  title: const Text('Texture resolution'),
-                  subtitle: const Text('Bake output size (px)'),
-                  trailing: DropdownButton<int>(
-                    value: _debug.textureSize,
-                    items: <DropdownMenuItem<int>>[
-                      for (final int size in DebugSettings.textureSizeOptions)
-                        DropdownMenuItem<int>(
-                          value: size,
-                          child: Text(size == 0 ? 'Original' : '$size'),
-                        ),
-                    ],
-                    onChanged: (int? v) {
-                      if (v != null) {
-                        _debug.textureSize = v;
-                      }
-                    },
-                  ),
-                ),
                 if (_saved != null)
                   ListTile(
                     leading: _baking
@@ -253,7 +234,7 @@ class _CapturePageState extends State<CapturePage> {
         session: session,
         directory: dir,
         fillHoles: _debug.fillHoles,
-        textureSize: _debug.textureSize,
+        textureSize: 0, // 0 = Original (source photo resolution)
       );
       if (mounted) {
         setState(() {
