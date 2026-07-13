@@ -1,0 +1,44 @@
+# Strict static analysis — tuned for automated linting/formatting (CI-friendly).
+# Single source of truth so the codebase reads "as if written by one hand".
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    # Treat hygiene issues as build-breaking in CI.
+    missing_required_param: error
+    missing_return: error
+    todo: ignore
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - build/**
+    - tool/** # standalone dev scripts, not shipped
+
+linter:
+  rules:
+    # Consistency / readability.
+    always_declare_return_types: true
+    prefer_single_quotes: true
+    prefer_final_locals: true
+    prefer_final_in_for_each: true
+    require_trailing_commas: true
+    directives_ordering: true
+    sort_constructors_first: true
+    unnecessary_lambdas: true
+    # Disabled: clashes with our private-field constructor-injection pattern
+    # (would force underscore-prefixed public named parameters).
+    prefer_initializing_formals: false
+    # Immutability / correctness.
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    avoid_dynamic_calls: true
+    avoid_returning_null_for_void: true
+    # Public API discipline.
+    public_member_api_docs: false
+    # Async safety.
+    unawaited_futures: true
+    discarded_futures: true

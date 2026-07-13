@@ -1,0 +1,31 @@
+name: flutter_face_scan
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_bloc: ^8.1.6
+  bloc: ^8.1.4
+  equatable: ^2.0.5
+  path_provider: ^2.1.4
+  # Imported directly across the codebase (Vector3/Matrix4/etc). Declared
+  # explicitly rather than relying on it arriving transitively.
+  vector_math: ^2.1.4
+
+  # Pure-Dart JPG decode + PNG encode for UV texture baking (tool + app isolate).
+  image: ^4.0.0
+
+  arkit_plugin: ^1.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

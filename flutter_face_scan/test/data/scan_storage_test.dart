@@ -1,0 +1,65 @@
+import 'dart:io';
+
+import 'package:flutter_face_scan/features/face_capture/data/scan_storage.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  late Directory tempDir;
+
+  setUp(() async {
+    tempDir = await Directory.systemTemp.createTemp('scan_storage_test');
+  });
+  tearDown(() async {
+    if (tempDir.existsSync()) {
+      await tempDir.delete(recursive: true);
+    }
+  });
+
+  Future<void> makeSession(String id, {int bytes = 10}) async {
+    final Directory dir = Directory('${tempDir.path}/face_scans/$id');
+    await dir.create(recursive: true);
+    await File('${dir.path}/frontal.ply').writeAsString('x' * bytes);
+    await File('${dir.path}/manifest.json').writeAsString('{}');
+  }
+
+  test('lists nothing when no scans exist', () async {
+    final ScanStorage storage = ScanStorage(rootDirectory: tempDir);
+    expect(await storage.list(), isEmpty);
+  });
+
+  test('lists saved sessions with id and non-zero size', () async {
+    await makeSession('session_a', bytes: 100);
+    await makeSession('session_b', bytes: 50);
+
+    final ScanStorage storage = ScanStorage(rootDirectory: tempDir);
+    final List<ScanEntry> entries = await storage.list();
+
+    expect(entries.map((ScanEntry e) => e.id), containsAll(<String>[
+      'session_a',
+      'session_b',
+    ]));
+    expect(entries.every((ScanEntry e) => e.sizeBytes > 0), isTrue);
+  });
+
+  test('deletes a single session', () async {
+    await makeSession('session_a');
+    await makeSession('session_b');
+    final ScanStorage storage = ScanStorage(rootDirectory: tempDir);
+
+    await storage.delete('session_a');
+
+    final List<String> ids =
+        (await storage.list()).map((ScanEntry e) => e.id).toList();
+    expect(ids, <String>['session_b']);
+  });
+
+  test('deletes all sessions', () async {
+    await makeSession('session_a');
+    await makeSession('session_b');
+    final ScanStorage storage = ScanStorage(rootDirectory: tempDir);
+
+    await storage.deleteAll();
+
+    expect(await storage.list(), isEmpty);
+  });
+}
