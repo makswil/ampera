@@ -53,7 +53,7 @@ enum FaceTrackingPlugin {
         manager.stop()
         result(nil)
       case "captureStill":
-        result(manager.captureStill())
+        manager.captureStill(result: result)
       case "shareFiles":
         let paths = (call.arguments as? [String: Any])?["paths"] as? [String] ?? []
         faceScanPresentShare(paths)
@@ -99,6 +99,9 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   // The face-mesh triangle topology is constant; send it once per session.
   private var sentTopology = false
 
+  // Whether the session can grab a hi-res still via captureHighResolutionFrame.
+  private var supportsHiResCapture = false
+
   private let ciContext = CIContext()
 
   private override init() {
@@ -121,8 +124,15 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     let configuration = ARFaceTrackingConfiguration()
     configuration.maximumNumberOfTrackedFaces = 1
     configuration.isLightEstimationEnabled = false
-    // Highest-resolution video format for the sharpest source photos.
-    if let best = ARFaceTrackingConfiguration.supportedVideoFormats.max(by: {
+    // Prefer a format that supports hi-res frame capture (sharper stills), else
+    // the highest-resolution video format.
+    supportsHiResCapture = false
+    if #available(iOS 16.0, *),
+       let hiRes = ARFaceTrackingConfiguration
+         .recommendedVideoFormatForHighResolutionFrameCapturing {
+      configuration.videoFormat = hiRes
+      supportsHiResCapture = true
+    } else if let best = ARFaceTrackingConfiguration.supportedVideoFormats.max(by: {
       $0.imageResolution.width * $0.imageResolution.height
         < $1.imageResolution.width * $1.imageResolution.height
     }) {
@@ -142,12 +152,30 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     sentTopology = false
   }
 
-  /// Portrait JPEG + the projection into it, all from one `currentFrame` (so
-  /// pixels and matrices agree). Returns nil if no frame / no tracked face. Map:
-  /// `jpeg`, `width`, `height`, `viewMatrix`, `projectionMatrix`, `faceTransform`
-  /// (matrices 16-float column-major). `.oriented(.right)` matches `.portrait`.
-  func captureStill() -> [String: Any]? {
-    guard let frame = sceneView.session.currentFrame,
+  /// Async so it can grab a HI-RES still via `captureHighResolutionFrame` (from
+  /// the running ARKit session) when supported; falls back to the current
+  /// video-res frame otherwise. Passes the still map (or nil) to [result].
+  func captureStill(result: @escaping FlutterResult) {
+    if #available(iOS 16.0, *), supportsHiResCapture {
+      sceneView.session.captureHighResolutionFrame { [weak self] frame, error in
+        guard let self = self else { result(nil); return }
+        let dict = (frame != nil && error == nil)
+          ? self.stillDict(from: frame)
+          : self.stillDict(from: self.sceneView.session.currentFrame)
+        // Completion may run off the main thread; FlutterResult must be on main.
+        DispatchQueue.main.async { result(dict) }
+      }
+    } else {
+      result(stillDict(from: sceneView.session.currentFrame))
+    }
+  }
+
+  /// Portrait JPEG + the projection into it, all from one [frame] (so pixels and
+  /// matrices agree). Nil if no frame / no tracked face. Map: `jpeg`, `width`,
+  /// `height`, `viewMatrix`, `projectionMatrix`, `faceTransform` (matrices
+  /// 16-float column-major). `.oriented(.right)` matches `.portrait`.
+  private func stillDict(from frame: ARFrame?) -> [String: Any]? {
+    guard let frame = frame,
           let faceAnchor = frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first
     else { return nil }
 
