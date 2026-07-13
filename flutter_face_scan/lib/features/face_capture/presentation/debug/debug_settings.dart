@@ -21,9 +21,9 @@ class DebugSettings extends ChangeNotifier {
        _fillHoles = fillHoles ?? true,
        _textureSize = textureSize ?? 2048;
 
-  /// Selectable bake texture resolutions (px). Higher only adds real detail up
-  /// to the source photo resolution — above that it just upsamples.
-  static const List<int> textureSizeOptions = <int>[1024, 2048, 4096];
+  /// Selectable bake texture resolutions (px). `0` = Original (match the source
+  /// photo). Higher fixed sizes only add real detail up to the source photo.
+  static const List<int> textureSizeOptions = <int>[1024, 2048, 4096, 0];
 
   bool _showHud;
   bool _showMesh;

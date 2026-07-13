@@ -152,7 +152,7 @@ class _CapturePageState extends State<CapturePage> {
                       for (final int size in DebugSettings.textureSizeOptions)
                         DropdownMenuItem<int>(
                           value: size,
-                          child: Text('$size'),
+                          child: Text(size == 0 ? 'Original' : '$size'),
                         ),
                     ],
                     onChanged: (int? v) {
@@ -355,6 +355,10 @@ class _CapturePageState extends State<CapturePage> {
                             CaptureDebugHud(
                           state: state,
                           hiRes: _trackingService.hiResCapture,
+                          srcRes: _trackingService.captureWidth > 0
+                              ? '${_trackingService.captureWidth}'
+                                  'x${_trackingService.captureHeight}'
+                              : null,
                         ),
                       )
                     : const SizedBox.shrink(),

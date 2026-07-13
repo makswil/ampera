@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show compute;
@@ -50,6 +51,17 @@ final class SessionTextureBaker {
     ].join('_');
   }
 
+  /// Resolves a requested texture size. `> 0` is used as-is; `<= 0` (Original)
+  /// becomes the frontal still's larger dimension, clamped to [512, 8192].
+  static int _resolveTextureSize(int requested, CaptureSession session) {
+    if (requested > 0) {
+      return requested;
+    }
+    final StillCapture? frontal = session.stills[FacePose.frontal];
+    final int src = frontal == null ? 0 : math.max(frontal.width, frontal.height);
+    return src <= 0 ? 2048 : src.clamp(512, 8192);
+  }
+
   Future<BakedTexture?> bake({
     required CaptureSession session,
     required Directory directory,
@@ -57,12 +69,15 @@ final class SessionTextureBaker {
     int textureSize = 2048,
     bool flipSides = false,
   }) async {
-    final String base = _baseName(fillHoles: fillHoles, textureSize: textureSize);
+    // textureSize 0 = Original: match the frontal still's larger dimension
+    // (clamped), so the atlas isn't the bottleneck.
+    final int resolved = _resolveTextureSize(textureSize, session);
+    final String base = _baseName(fillHoles: fillHoles, textureSize: resolved);
     final _BakeRequest? request = _buildRequest(
       session,
       base: base,
       fillHoles: fillHoles,
-      textureSize: textureSize,
+      textureSize: resolved,
       flipSides: flipSides,
     );
     if (request == null) {

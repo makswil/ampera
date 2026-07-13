@@ -35,12 +35,20 @@ const bool kFaceMeshOverlay =
 ///
 /// Even when compiled in, tap the badge to hide it instantly.
 class CaptureDebugHud extends StatefulWidget {
-  const CaptureDebugHud({required this.state, this.hiRes, super.key});
+  const CaptureDebugHud({
+    required this.state,
+    this.hiRes,
+    this.srcRes,
+    super.key,
+  });
 
   final CaptureState state;
 
   /// Whether stills use hi-res capture (null = not yet known).
   final bool? hiRes;
+
+  /// Configured video source resolution, e.g. "1920x1440" (null = unknown).
+  final String? srcRes;
 
   @override
   State<CaptureDebugHud> createState() => _CaptureDebugHudState();
@@ -59,6 +67,7 @@ class _CaptureDebugHudState extends State<CaptureDebugHud> {
             ? _Panel(
                 state: widget.state,
                 hiRes: widget.hiRes,
+                srcRes: widget.srcRes,
                 onHide: () => setState(() => _visible = false),
               )
             : _ShowBadge(onShow: () => setState(() => _visible = true)),
@@ -85,10 +94,16 @@ class _ShowBadge extends StatelessWidget {
 }
 
 class _Panel extends StatelessWidget {
-  const _Panel({required this.state, required this.onHide, this.hiRes});
+  const _Panel({
+    required this.state,
+    required this.onHide,
+    this.hiRes,
+    this.srcRes,
+  });
 
   final CaptureState state;
   final bool? hiRes;
+  final String? srcRes;
   final VoidCallback onHide;
 
   @override
@@ -142,6 +157,7 @@ class _Panel extends StatelessWidget {
             _row('hold', '${(state.holdProgress * 100).round()}%'),
             _row('snapshots', '${state.snapshots.length}'),
             _row('hi-res cap', hiRes == null ? '—' : (hiRes! ? 'YES' : 'no')),
+            _row('video res', srcRes ?? '—'),
             _row('hint', _hint(v?.guidance)),
           ],
         ),

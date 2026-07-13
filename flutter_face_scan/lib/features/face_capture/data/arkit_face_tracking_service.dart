@@ -58,6 +58,13 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
 
   bool? get hiResCapture => _hiResCapture;
 
+  /// Configured video-format resolution (px); 0 until known. For the HUD.
+  int _captureWidth = 0;
+  int _captureHeight = 0;
+
+  int get captureWidth => _captureWidth;
+  int get captureHeight => _captureHeight;
+
   @override
   Stream<FaceObservation> get observations => _controller.stream;
 
@@ -154,6 +161,12 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     final Object? rawHiRes = payload['hiResCapture'];
     if (rawHiRes is bool) {
       _hiResCapture = rawHiRes;
+    }
+    final Object? rawW = payload['captureWidth'];
+    final Object? rawH = payload['captureHeight'];
+    if (rawW is num && rawH is num) {
+      _captureWidth = rawW.toInt();
+      _captureHeight = rawH.toInt();
     }
 
     final bool isTracked = payload['isTracked'] as bool? ?? false;

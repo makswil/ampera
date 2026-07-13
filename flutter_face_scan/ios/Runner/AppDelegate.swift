@@ -102,6 +102,9 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   // Whether the session can grab a hi-res still via captureHighResolutionFrame.
   private var supportsHiResCapture = false
 
+  // Configured video-format resolution (landscape sensor px) — for the HUD.
+  private var captureResolution: CGSize = .zero
+
   private let ciContext = CIContext()
 
   private override init() {
@@ -124,20 +127,28 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     let configuration = ARFaceTrackingConfiguration()
     configuration.maximumNumberOfTrackedFaces = 1
     configuration.isLightEstimationEnabled = false
-    // Prefer a format that supports hi-res frame capture (sharper stills), else
-    // the highest-resolution video format.
+    // Prefer a format that supports hi-res frame capture (sharper stills). Try
+    // the recommended one, else any format flagged for it; fall back to the
+    // highest-resolution video format.
     supportsHiResCapture = false
-    if #available(iOS 16.0, *),
-       let hiRes = ARFaceTrackingConfiguration
-         .recommendedVideoFormatForHighResolutionFrameCapturing {
-      configuration.videoFormat = hiRes
-      supportsHiResCapture = true
-    } else if let best = ARFaceTrackingConfiguration.supportedVideoFormats.max(by: {
-      $0.imageResolution.width * $0.imageResolution.height
-        < $1.imageResolution.width * $1.imageResolution.height
-    }) {
+    if #available(iOS 16.0, *) {
+      let hiRes = ARFaceTrackingConfiguration
+        .recommendedVideoFormatForHighResolutionFrameCapturing
+        ?? ARFaceTrackingConfiguration.supportedVideoFormats
+          .first(where: { $0.isRecommendedForHighResolutionFrameCapturing })
+      if let hiRes = hiRes {
+        configuration.videoFormat = hiRes
+        supportsHiResCapture = true
+      }
+    }
+    if !supportsHiResCapture,
+       let best = ARFaceTrackingConfiguration.supportedVideoFormats.max(by: {
+         $0.imageResolution.width * $0.imageResolution.height
+           < $1.imageResolution.width * $1.imageResolution.height
+       }) {
       configuration.videoFormat = best
     }
+    captureResolution = configuration.videoFormat.imageResolution
     sceneView.session.run(
       configuration,
       options: [.resetTracking, .removeExistingAnchors]
@@ -344,8 +355,10 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       }
       result["textureCoordinates"] = float32Data(uvs)
 
-      // Whether stills use captureHighResolutionFrame (HUD readout).
+      // Hi-res capture flag + configured video resolution (HUD readout).
       result["hiResCapture"] = supportsHiResCapture
+      result["captureWidth"] = Int(captureResolution.width)
+      result["captureHeight"] = Int(captureResolution.height)
 
       sentTopology = true
     }
