@@ -52,6 +52,12 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
   /// cached and re-attached to every frame so snapshots carry them for baking.
   List<double> _textureCoordinates = const <double>[];
 
+  /// Whether stills use `captureHighResolutionFrame` (sent once by native).
+  /// Null until the first frame of a session; for the calibration HUD.
+  bool? _hiResCapture;
+
+  bool? get hiResCapture => _hiResCapture;
+
   @override
   Stream<FaceObservation> get observations => _controller.stream;
 
@@ -144,6 +150,10 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     final Object? rawUVs = payload['textureCoordinates'];
     if (rawUVs != null) {
       _textureCoordinates = _decodeRawVertices(rawUVs);
+    }
+    final Object? rawHiRes = payload['hiResCapture'];
+    if (rawHiRes is bool) {
+      _hiResCapture = rawHiRes;
     }
 
     final bool isTracked = payload['isTracked'] as bool? ?? false;

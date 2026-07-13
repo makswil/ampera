@@ -35,9 +35,12 @@ const bool kFaceMeshOverlay =
 ///
 /// Even when compiled in, tap the badge to hide it instantly.
 class CaptureDebugHud extends StatefulWidget {
-  const CaptureDebugHud({required this.state, super.key});
+  const CaptureDebugHud({required this.state, this.hiRes, super.key});
 
   final CaptureState state;
+
+  /// Whether stills use hi-res capture (null = not yet known).
+  final bool? hiRes;
 
   @override
   State<CaptureDebugHud> createState() => _CaptureDebugHudState();
@@ -55,6 +58,7 @@ class _CaptureDebugHudState extends State<CaptureDebugHud> {
         child: _visible
             ? _Panel(
                 state: widget.state,
+                hiRes: widget.hiRes,
                 onHide: () => setState(() => _visible = false),
               )
             : _ShowBadge(onShow: () => setState(() => _visible = true)),
@@ -81,9 +85,10 @@ class _ShowBadge extends StatelessWidget {
 }
 
 class _Panel extends StatelessWidget {
-  const _Panel({required this.state, required this.onHide});
+  const _Panel({required this.state, required this.onHide, this.hiRes});
 
   final CaptureState state;
+  final bool? hiRes;
   final VoidCallback onHide;
 
   @override
@@ -136,6 +141,7 @@ class _Panel extends StatelessWidget {
             _row('distance', _cm(v?.distanceMeters)),
             _row('hold', '${(state.holdProgress * 100).round()}%'),
             _row('snapshots', '${state.snapshots.length}'),
+            _row('hi-res cap', hiRes == null ? '—' : (hiRes! ? 'YES' : 'no')),
             _row('hint', _hint(v?.guidance)),
           ],
         ),

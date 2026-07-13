@@ -344,6 +344,9 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       }
       result["textureCoordinates"] = float32Data(uvs)
 
+      // Whether stills use captureHighResolutionFrame (HUD readout).
+      result["hiResCapture"] = supportsHiResCapture
+
       sentTopology = true
     }
 

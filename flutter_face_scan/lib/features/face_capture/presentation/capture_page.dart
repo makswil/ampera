@@ -352,7 +352,10 @@ class _CapturePageState extends State<CapturePage> {
                 builder: (BuildContext context, Widget? _) => _debug.showHud
                     ? BlocBuilder<CaptureBloc, CaptureState>(
                         builder: (BuildContext context, CaptureState state) =>
-                            CaptureDebugHud(state: state),
+                            CaptureDebugHud(
+                          state: state,
+                          hiRes: _trackingService.hiResCapture,
+                        ),
                       )
                     : const SizedBox.shrink(),
               ),
