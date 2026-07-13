@@ -359,6 +359,10 @@ class _CapturePageState extends State<CapturePage> {
                               ? '${_trackingService.captureWidth}'
                                   'x${_trackingService.captureHeight}'
                               : null,
+                          photoRes: _trackingService.photoWidth > 0
+                              ? '${_trackingService.photoWidth}'
+                                  'x${_trackingService.photoHeight}'
+                              : null,
                         ),
                       )
                     : const SizedBox.shrink(),

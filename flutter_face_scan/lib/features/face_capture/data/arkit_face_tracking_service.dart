@@ -65,6 +65,13 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
   int get captureWidth => _captureWidth;
   int get captureHeight => _captureHeight;
 
+  /// Front camera's max still-photo resolution (px); 0 until known. For the HUD.
+  int _photoWidth = 0;
+  int _photoHeight = 0;
+
+  int get photoWidth => _photoWidth;
+  int get photoHeight => _photoHeight;
+
   @override
   Stream<FaceObservation> get observations => _controller.stream;
 
@@ -167,6 +174,12 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     if (rawW is num && rawH is num) {
       _captureWidth = rawW.toInt();
       _captureHeight = rawH.toInt();
+    }
+    final Object? rawPW = payload['photoWidth'];
+    final Object? rawPH = payload['photoHeight'];
+    if (rawPW is num && rawPH is num) {
+      _photoWidth = rawPW.toInt();
+      _photoHeight = rawPH.toInt();
     }
 
     final bool isTracked = payload['isTracked'] as bool? ?? false;

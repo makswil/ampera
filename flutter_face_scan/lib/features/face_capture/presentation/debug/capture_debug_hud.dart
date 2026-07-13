@@ -39,6 +39,7 @@ class CaptureDebugHud extends StatefulWidget {
     required this.state,
     this.hiRes,
     this.srcRes,
+    this.photoRes,
     super.key,
   });
 
@@ -47,8 +48,11 @@ class CaptureDebugHud extends StatefulWidget {
   /// Whether stills use hi-res capture (null = not yet known).
   final bool? hiRes;
 
-  /// Configured video source resolution, e.g. "1920x1440" (null = unknown).
+  /// Configured video source resolution, e.g. "1440x1080" (null = unknown).
   final String? srcRes;
+
+  /// Front camera's max still-photo resolution, e.g. "3088x2316".
+  final String? photoRes;
 
   @override
   State<CaptureDebugHud> createState() => _CaptureDebugHudState();
@@ -68,6 +72,7 @@ class _CaptureDebugHudState extends State<CaptureDebugHud> {
                 state: widget.state,
                 hiRes: widget.hiRes,
                 srcRes: widget.srcRes,
+                photoRes: widget.photoRes,
                 onHide: () => setState(() => _visible = false),
               )
             : _ShowBadge(onShow: () => setState(() => _visible = true)),
@@ -99,11 +104,13 @@ class _Panel extends StatelessWidget {
     required this.onHide,
     this.hiRes,
     this.srcRes,
+    this.photoRes,
   });
 
   final CaptureState state;
   final bool? hiRes;
   final String? srcRes;
+  final String? photoRes;
   final VoidCallback onHide;
 
   @override
@@ -158,6 +165,7 @@ class _Panel extends StatelessWidget {
             _row('snapshots', '${state.snapshots.length}'),
             _row('hi-res cap', hiRes == null ? '—' : (hiRes! ? 'YES' : 'no')),
             _row('video res', srcRes ?? '—'),
+            _row('photo res', photoRes ?? '—'),
             _row('hint', _hint(v?.guidance)),
           ],
         ),

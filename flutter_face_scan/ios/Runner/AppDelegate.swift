@@ -1,4 +1,5 @@
 import ARKit
+import AVFoundation
 import CoreImage
 import Flutter
 import SceneKit
@@ -105,6 +106,10 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   // Configured video-format resolution (landscape sensor px) — for the HUD.
   private var captureResolution: CGSize = .zero
 
+  // Front camera's max still-photo resolution (what AVCapturePhoto could give) —
+  // for the HUD, to show the gap vs. the ARKit video feed.
+  private var frontPhotoResolution: CGSize = .zero
+
   private let ciContext = CIContext()
 
   private override init() {
@@ -149,6 +154,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       configuration.videoFormat = best
     }
     captureResolution = configuration.videoFormat.imageResolution
+    frontPhotoResolution = Self.maxFrontPhotoResolution()
     sceneView.session.run(
       configuration,
       options: [.resetTracking, .removeExistingAnchors]
@@ -161,6 +167,32 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     sceneView.session.pause()
     isRunning = false
     sentTopology = false
+  }
+
+  /// Max still-photo resolution of the TrueDepth front camera (read-only query,
+  /// no session). Shows how much the ARKit face-video feed leaves on the table.
+  private static func maxFrontPhotoResolution() -> CGSize {
+    guard let device = AVCaptureDevice.default(
+      .builtInTrueDepthCamera, for: .video, position: .front
+    ) else { return .zero }
+    var best = CGSize.zero
+    for format in device.formats {
+      var w = 0
+      var h = 0
+      if #available(iOS 16.0, *),
+         let dim = format.supportedMaxPhotoDimensions.max(by: {
+           Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+         }) {
+        w = Int(dim.width); h = Int(dim.height)
+      } else {
+        let dim = format.highResolutionStillImageDimensions
+        w = Int(dim.width); h = Int(dim.height)
+      }
+      if w * h > Int(best.width) * Int(best.height) {
+        best = CGSize(width: w, height: h)
+      }
+    }
+    return best
   }
 
   /// Async so it can grab a HI-RES still via `captureHighResolutionFrame` (from
@@ -355,10 +387,12 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       }
       result["textureCoordinates"] = float32Data(uvs)
 
-      // Hi-res capture flag + configured video resolution (HUD readout).
+      // Hi-res capture flag + video + max photo resolution (HUD readout).
       result["hiResCapture"] = supportsHiResCapture
       result["captureWidth"] = Int(captureResolution.width)
       result["captureHeight"] = Int(captureResolution.height)
+      result["photoWidth"] = Int(frontPhotoResolution.width)
+      result["photoHeight"] = Int(frontPhotoResolution.height)
 
       sentTopology = true
     }
