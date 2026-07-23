@@ -1,4 +1,5 @@
 import ARKit
+import Accelerate
 import AVFoundation
 import CoreImage
 import CoreML
@@ -956,6 +957,10 @@ final class FacePreviewView: NSObject, FlutterPlatformView {
 /// U-Net@256 → per-pixel gain ratio upsampled to full res. Model lives in
 /// `Runner/Models/MLWhiteBalance.mlpackage` (exported from the untouched ml-wb
 /// checkpoint). Failures return the original JPEGs so bake never hard-fails.
+///
+/// Performance (no intentional quality trade-off): Accelerate vImage upsample,
+/// direct MLMultiArray packing, Kelvin on 256px (same grid as the model), and
+/// adaptive pose parallelism (4 / 2 / 1 by cores / RAM / thermal).
 final class MLWhiteBalanceCorrector {
   static let shared = MLWhiteBalanceCorrector()
 
@@ -1003,7 +1008,6 @@ final class MLWhiteBalanceCorrector {
       targetKelvin = Float(t)
     }
 
-    // Decode all images first (need frontal Kelvin when matchFrontal).
     var images: [CGImage] = []
     images.reserveCapacity(datas.count)
     var decodeMs: Double = 0
@@ -1023,7 +1027,16 @@ final class MLWhiteBalanceCorrector {
     var kelvinMs: Double = 0
     if matchFrontal, let first = images.first {
       let t0 = CFAbsoluteTimeGetCurrent()
-      targetKelvin = estimateKelvin(first)
+      // CCT on the same 256 grid the U-Net sees (not a quality downgrade of
+      // the output JPEG — only the illuminant estimate).
+      if let small = resizeCGImage(first, to: Self.imageSize),
+         let rgba = rgbaBytes(small) {
+        targetKelvin = estimateKelvin(
+          rgba: rgba, width: Self.imageSize, height: Self.imageSize
+        )
+      } else {
+        targetKelvin = estimateKelvin(first)
+      }
       kelvinMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
     }
 
@@ -1035,58 +1048,125 @@ final class MLWhiteBalanceCorrector {
       ]
     }
 
-    var outJpegs: [FlutterStandardTypedData] = []
-    outJpegs.reserveCapacity(images.count)
+    let n = images.count
+    let parallel = Self.mlWbParallelism()
+    var outJpegs = [FlutterStandardTypedData?](repeating: nil, count: n)
     var sumPredict: Double = 0
     var sumApply: Double = 0
     var sumEncode: Double = 0
-    for (i, cg) in images.enumerated() {
-      let tPose = CFAbsoluteTimeGetCurrent()
-      if let corrected = correctImageTimed(cg, targetKelvin: targetKelvin) {
-        let tEnc = CFAbsoluteTimeGetCurrent()
-        if let jpeg = jpegData(corrected.image, quality: 0.95) {
-          let encMs = (CFAbsoluteTimeGetCurrent() - tEnc) * 1000
-          sumEncode += encMs
-          outJpegs.append(FlutterStandardTypedData(bytes: jpeg))
-          var timing = corrected.timing
-          timing["encode"] = encMs
-          timing["poseTotal"] = (CFAbsoluteTimeGetCurrent() - tPose) * 1000
-          sumPredict += timing["predict"] ?? 0
-          sumApply += timing["apply"] ?? 0
-          NSLog(
-            "[face_scan] ml-wb pose%d ms: rgba=%.0f kelvin=%.0f resize=%.0f pack=%.0f predict=%.0f ratio=%.0f upsample=%.0f apply=%.0f encode=%.0f total=%.0f (%dx%d)",
-            i,
-            timing["rgba"] ?? 0, timing["kelvin"] ?? 0, timing["resize"] ?? 0,
-            timing["pack"] ?? 0, timing["predict"] ?? 0, timing["ratio"] ?? 0,
-            timing["upsample"] ?? 0, timing["apply"] ?? 0, encMs,
-            timing["poseTotal"] ?? 0, cg.width, cg.height
-          )
-        } else {
-          outJpegs.append(FlutterStandardTypedData(bytes: datas[i]))
+    var sumUpsample: Double = 0
+    var sumRgba: Double = 0
+    let lock = NSLock()
+
+    let opQueue = OperationQueue()
+    opQueue.name = "flutter_face_scan.ml_wb.poses"
+    opQueue.maxConcurrentOperationCount = parallel
+    let group = DispatchGroup()
+
+    for i in 0..<n {
+      group.enter()
+      opQueue.addOperation { [weak self] in
+        defer { group.leave() }
+        guard let self else { return }
+        let tPose = CFAbsoluteTimeGetCurrent()
+        let cg = images[i]
+        guard let corrected = self.correctImageTimed(cg, targetKelvin: targetKelvin)
+        else {
+          lock.lock()
+          outJpegs[i] = FlutterStandardTypedData(bytes: datas[i])
+          lock.unlock()
+          return
         }
-      } else {
-        outJpegs.append(FlutterStandardTypedData(bytes: datas[i]))
+        let tEnc = CFAbsoluteTimeGetCurrent()
+        // Keep prior JPEG quality — no end-product quality trade-off.
+        guard let jpeg = self.jpegData(corrected.image, quality: 0.95) else {
+          lock.lock()
+          outJpegs[i] = FlutterStandardTypedData(bytes: datas[i])
+          lock.unlock()
+          return
+        }
+        let encMs = (CFAbsoluteTimeGetCurrent() - tEnc) * 1000
+        var timing = corrected.timing
+        timing["encode"] = encMs
+        timing["poseTotal"] = (CFAbsoluteTimeGetCurrent() - tPose) * 1000
+        lock.lock()
+        outJpegs[i] = FlutterStandardTypedData(bytes: jpeg)
+        sumPredict += timing["predict"] ?? 0
+        sumApply += timing["apply"] ?? 0
+        sumEncode += encMs
+        sumUpsample += timing["upsample"] ?? 0
+        sumRgba += timing["rgba"] ?? 0
+        lock.unlock()
+        NSLog(
+          "[face_scan] ml-wb pose%d ms: rgba=%.0f kelvin=%.0f resize=%.0f pack=%.0f predict=%.0f ratio=%.0f upsample=%.0f apply=%.0f encode=%.0f total=%.0f (%dx%d)",
+          i,
+          timing["rgba"] ?? 0, timing["kelvin"] ?? 0, timing["resize"] ?? 0,
+          timing["pack"] ?? 0, timing["predict"] ?? 0, timing["ratio"] ?? 0,
+          timing["upsample"] ?? 0, timing["apply"] ?? 0, encMs,
+          timing["poseTotal"] ?? 0, cg.width, cg.height
+        )
       }
+    }
+    group.wait()
+    opQueue.waitUntilAllOperationsAreFinished()
+
+    let finalized: [FlutterStandardTypedData] = (0..<n).map { i in
+      outJpegs[i] ?? FlutterStandardTypedData(bytes: datas[i])
     }
     let batchMs = (CFAbsoluteTimeGetCurrent() - tBatch) * 1000
     NSLog(
-      "[face_scan] ml-wb BATCH ms: decode=%.0f kelvinRef=%.0f predictΣ=%.0f applyΣ=%.0f encodeΣ=%.0f total=%.0f poses=%d",
-      decodeMs, kelvinMs, sumPredict, sumApply, sumEncode, batchMs, images.count
+      "[face_scan] ml-wb BATCH ms: decode=%.0f kelvinRef=%.0f rgbaΣ=%.0f predictΣ=%.0f upsampleΣ=%.0f applyΣ=%.0f encodeΣ=%.0f total=%.0f poses=%d parallel=%d",
+      decodeMs, kelvinMs, sumRgba, sumPredict, sumUpsample, sumApply, sumEncode,
+      batchMs, n, parallel
     )
     return [
       "ok": true,
       "targetKelvin": Double(targetKelvin),
-      "jpegs": outJpegs,
+      "jpegs": finalized,
       "timingsMs": [
         "decode": decodeMs,
         "kelvinRef": kelvinMs,
+        "rgbaSum": sumRgba,
         "predictSum": sumPredict,
+        "upsampleSum": sumUpsample,
         "applySum": sumApply,
         "encodeSum": sumEncode,
         "batchTotal": batchMs,
-        "poses": Double(images.count),
+        "poses": Double(n),
+        "parallel": Double(parallel),
       ] as [String: Double],
     ]
+  }
+
+  /// 4 on strong devices, 2 on mid, 1 when hot / low-core / low-RAM.
+  private static func mlWbParallelism() -> Int {
+    let info = ProcessInfo.processInfo
+    let cores = info.activeProcessorCount
+    let gb = Double(info.physicalMemory) / 1_073_741_824.0
+    let n: Int
+    switch info.thermalState {
+    case .critical, .serious:
+      n = 1
+    case .fair:
+      n = cores >= 4 ? 2 : 1
+    case .nominal:
+      fallthrough
+    @unknown default:
+      if cores >= 6 && gb >= 5.5 {
+        n = 4
+      } else if cores >= 4 && gb >= 3.5 {
+        n = 2
+      } else {
+        n = 1
+      }
+    }
+    return max(1, min(4, min(n, min(cores, imagesCap(gb: gb)))))
+  }
+
+  private static func imagesCap(gb: Double) -> Int {
+    if gb < 3.0 { return 1 }
+    if gb < 4.5 { return 2 }
+    return 4
   }
 
   @discardableResult
@@ -1116,7 +1196,6 @@ final class MLWhiteBalanceCorrector {
     }
   }
 
-  /// Per-image correction result + stage timings (milliseconds).
   private struct CorrectedImage {
     let image: CGImage
     let timing: [String: Double]
@@ -1126,41 +1205,36 @@ final class MLWhiteBalanceCorrector {
     guard let model else { return nil }
     let w = cg.width
     let h = cg.height
+    guard w > 0, h > 0 else { return nil }
     var timing: [String: Double] = [:]
+    let size = Self.imageSize
 
-    let tRgba = CFAbsoluteTimeGetCurrent()
-    guard w > 0, h > 0, let rgba = rgbaBytes(cg) else { return nil }
-    timing["rgba"] = (CFAbsoluteTimeGetCurrent() - tRgba) * 1000
+    let tResize = CFAbsoluteTimeGetCurrent()
+    guard let smallCG = resizeCGImage(cg, to: size),
+          let resized = rgbaBytes(smallCG)
+    else { return nil }
+    timing["resize"] = (CFAbsoluteTimeGetCurrent() - tResize) * 1000
 
     let tKel = CFAbsoluteTimeGetCurrent()
-    let kIn = estimateKelvin(rgba: rgba, width: w, height: h)
+    let kIn = estimateKelvin(rgba: resized, width: size, height: size)
     timing["kelvin"] = (CFAbsoluteTimeGetCurrent() - tKel) * 1000
     let delta = max(Self.deltaMin, min(Self.deltaMax, kIn - targetKelvin))
 
-    let size = Self.imageSize
-    let tResize = CFAbsoluteTimeGetCurrent()
-    guard let resized = resizeRGBA(rgba, width: w, height: h, to: size) else {
-      return nil
-    }
-    timing["resize"] = (CFAbsoluteTimeGetCurrent() - tResize) * 1000
-
     let tPack = CFAbsoluteTimeGetCurrent()
     guard let imageArr = try? MLMultiArray(
-            shape: [1, 3, NSNumber(value: size), NSNumber(value: size)],
-            dataType: .float32
-          ),
-          let deltaArr = try? MLMultiArray(shape: [1], dataType: .float32)
+      shape: [1, 3, NSNumber(value: size), NSNumber(value: size)],
+      dataType: .float32
+    ),
+      let deltaArr = try? MLMultiArray(shape: [1], dataType: .float32)
     else { return nil }
 
     let plane = size * size
-    for y in 0..<size {
-      for x in 0..<size {
-        let src = (y * size + x) * 4
-        let dst = y * size + x
-        imageArr[dst] = NSNumber(value: Float(resized[src]) / 255)
-        imageArr[plane + dst] = NSNumber(value: Float(resized[src + 1]) / 255)
-        imageArr[2 * plane + dst] = NSNumber(value: Float(resized[src + 2]) / 255)
-      }
+    let imgPtr = imageArr.dataPointer.bindMemory(to: Float.self, capacity: 3 * plane)
+    for i in 0..<plane {
+      let src = i * 4
+      imgPtr[i] = Float(resized[src]) / 255
+      imgPtr[plane + i] = Float(resized[src + 1]) / 255
+      imgPtr[2 * plane + i] = Float(resized[src + 2]) / 255
     }
     deltaArr[0] = NSNumber(value: delta)
     timing["pack"] = (CFAbsoluteTimeGetCurrent() - tPack) * 1000
@@ -1182,37 +1256,47 @@ final class MLWhiteBalanceCorrector {
     timing["predict"] = (CFAbsoluteTimeGetCurrent() - tPred) * 1000
 
     let tRatio = CFAbsoluteTimeGetCurrent()
-    var ratio = [Float](repeating: 1, count: size * size * 3)
+    var ratio = [Float](repeating: 1, count: 3 * plane)
+    let corrPtr = corrected.dataPointer.bindMemory(to: Float.self, capacity: 3 * plane)
     for c in 0..<3 {
       for i in 0..<plane {
         let inVal = Float(resized[i * 4 + c]) / 255 + 1e-6
-        let outVal = corrected[c * plane + i].floatValue
+        let outVal = corrPtr[c * plane + i]
         ratio[c * plane + i] = max(0.1, min(4.0, outVal / inVal))
       }
     }
     timing["ratio"] = (CFAbsoluteTimeGetCurrent() - tRatio) * 1000
 
     let tUp = CFAbsoluteTimeGetCurrent()
-    guard let ratioFull = upsamplePlanar(
+    guard let ratioFull = upsamplePlanarVImage(
       ratio, channels: 3, srcSize: size, dstW: w, dstH: h
     ) else { return nil }
     timing["upsample"] = (CFAbsoluteTimeGetCurrent() - tUp) * 1000
 
+    let tRgba = CFAbsoluteTimeGetCurrent()
+    guard var rgba = rgbaBytes(cg) else { return nil }
+    timing["rgba"] = (CFAbsoluteTimeGetCurrent() - tRgba) * 1000
+
     let tApply = CFAbsoluteTimeGetCurrent()
-    var outRGBA = [UInt8](repeating: 0, count: w * h * 4)
     let fullPlane = w * h
-    for i in 0..<fullPlane {
-      let src = i * 4
-      for c in 0..<3 {
-        let v = Float(rgba[src + c]) / 255 * ratioFull[c * fullPlane + i]
-        outRGBA[src + c] = UInt8(max(0, min(255, Int((v * 255).rounded()))))
+    rgba.withUnsafeMutableBytes { raw in
+      let ptr = raw.bindMemory(to: UInt8.self).baseAddress!
+      ratioFull.withUnsafeBufferPointer { ratioBuf in
+        let rptr = ratioBuf.baseAddress!
+        for i in 0..<fullPlane {
+          let src = i * 4
+          for c in 0..<3 {
+            let v = Float(ptr[src + c]) * (1.0 / 255.0) * rptr[c * fullPlane + i]
+            let clamped = min(255.0, max(0.0, v * 255.0))
+            ptr[src + c] = UInt8(clamped)
+          }
+          ptr[src + 3] = 255
+        }
       }
-      outRGBA[src + 3] = 255
-    }
-    guard let outCg = cgImage(rgba: outRGBA, width: w, height: h) else {
-      return nil
     }
     timing["apply"] = (CFAbsoluteTimeGetCurrent() - tApply) * 1000
+
+    guard let outCg = cgImage(rgba: rgba, width: w, height: h) else { return nil }
     return CorrectedImage(image: outCg, timing: timing)
   }
 
@@ -1244,7 +1328,6 @@ final class MLWhiteBalanceCorrector {
     }
     guard count >= 10 else { return Self.defaultKelvin }
 
-    // Approximate sRGB → linear → XYZ → xy → McCamy CCT.
     let r = max(1e-6 as Float, pow(sr / count, 2.2))
     let g = max(1e-6 as Float, pow(sg / count, 2.2))
     let b = max(1e-6 as Float, pow(sb / count, 2.2))
@@ -1302,12 +1385,7 @@ final class MLWhiteBalanceCorrector {
     return img
   }
 
-  private func resizeRGBA(
-    _ rgba: [UInt8], width: Int, height: Int, to size: Int
-  ) -> [UInt8]? {
-    guard let src = cgImage(rgba: rgba, width: width, height: height) else {
-      return nil
-    }
+  private func resizeCGImage(_ cg: CGImage, to size: Int) -> CGImage? {
     var out = [UInt8](repeating: 0, count: size * size * 4)
     guard let ctx = CGContext(
       data: &out,
@@ -1319,43 +1397,47 @@ final class MLWhiteBalanceCorrector {
       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ) else { return nil }
     ctx.interpolationQuality = .high
-    ctx.draw(src, in: CGRect(x: 0, y: 0, width: size, height: size))
-    return out
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: size, height: size))
+    return ctx.makeImage()
   }
 
-  /// Bilinear upsample planar CHW float buffer to dstW×dstH.
-  private func upsamplePlanar(
+  /// vImage high-quality bilinear upsample of planar CHW float.
+  private func upsamplePlanarVImage(
     _ src: [Float], channels: Int, srcSize: Int, dstW: Int, dstH: Int
   ) -> [Float]? {
     let srcPlane = srcSize * srcSize
     let dstPlane = dstW * dstH
     var dst = [Float](repeating: 0, count: channels * dstPlane)
-    let scaleX = Float(srcSize - 1) / Float(max(dstW - 1, 1))
-    let scaleY = Float(srcSize - 1) / Float(max(dstH - 1, 1))
+    var scratch = [Float](repeating: 0, count: srcPlane)
     for c in 0..<channels {
-      let sBase = c * srcPlane
-      let dBase = c * dstPlane
-      for y in 0..<dstH {
-        let fy = Float(y) * scaleY
-        let y0 = Int(fy)
-        let y1 = min(y0 + 1, srcSize - 1)
-        let ty = fy - Float(y0)
-        for x in 0..<dstW {
-          let fx = Float(x) * scaleX
-          let x0 = Int(fx)
-          let x1 = min(x0 + 1, srcSize - 1)
-          let tx = fx - Float(x0)
-          let v00 = src[sBase + y0 * srcSize + x0]
-          let v10 = src[sBase + y0 * srcSize + x1]
-          let v01 = src[sBase + y1 * srcSize + x0]
-          let v11 = src[sBase + y1 * srcSize + x1]
-          let v0 = v00 + (v10 - v00) * tx
-          let v1 = v01 + (v11 - v01) * tx
-          dst[dBase + y * dstW + x] = v0 + (v1 - v0) * ty
+      for i in 0..<srcPlane {
+        scratch[i] = src[c * srcPlane + i]
+      }
+      let ok: Bool = scratch.withUnsafeMutableBufferPointer { sBuf in
+        dst.withUnsafeMutableBufferPointer { dBuf in
+          var srcBuf = vImage_Buffer(
+            data: sBuf.baseAddress,
+            height: vImagePixelCount(srcSize),
+            width: vImagePixelCount(srcSize),
+            rowBytes: srcSize * MemoryLayout<Float>.size
+          )
+          var dstBuf = vImage_Buffer(
+            data: dBuf.baseAddress!.advanced(by: c * dstPlane),
+            height: vImagePixelCount(dstH),
+            width: vImagePixelCount(dstW),
+            rowBytes: dstW * MemoryLayout<Float>.size
+          )
+          let err = vImageScale_PlanarF(
+            &srcBuf,
+            &dstBuf,
+            nil,
+            vImage_Flags(kvImageHighQualityResampling)
+          )
+          return err == kvImageNoError
         }
       }
+      if !ok { return nil }
     }
     return dst
   }
 }
-

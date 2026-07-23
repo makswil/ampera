@@ -247,12 +247,16 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     }
     double n(String k) => (raw[k] as num?)?.toDouble() ?? 0;
     final int poses = n('poses').round();
+    final int parallel = n('parallel').round();
     return 'ml-wb ${n('batchTotal').round()}ms '
         '(dec ${n('decode').round()} · '
+        'rgbaΣ ${n('rgbaSum').round()} · '
+        'upΣ ${n('upsampleSum').round()} · '
         'predΣ ${n('predictSum').round()} · '
         'applyΣ ${n('applySum').round()} · '
         'encΣ ${n('encodeSum').round()}'
-        '${poses > 0 ? ' · ×$poses' : ''})';
+        '${poses > 0 ? ' · ×$poses' : ''}'
+        '${parallel > 0 ? ' · p$parallel' : ''})';
   }
 
   /// Toggles the native verification overlay (live mesh wireframe + symmetry-axis
