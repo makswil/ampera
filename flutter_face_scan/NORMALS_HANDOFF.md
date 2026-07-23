@@ -37,8 +37,17 @@ blend (n·v)"** (⚙-Sheet, Default AUS → A/B). Ebenfalls im CLI-Tool via
 - Der **statische** Pfad (`_pickSide`/`sideWeight`/`downWeight`, `chinUpLowerFace`)
   bleibt als Fallback vollständig erhalten.
 
-**Offen:** Schritt C (Farb-/AE-AWB-Angleich, `ml-wb` prüfen — siehe §3.4) und
-optional D (Occlusion/Tiefentest).
+**Schritt C (Farbangleich) umgesetzt:** `TextureBaker.poseGain` berechnet pro
+Nicht-Frontal-Pose einen per-Kanal-RGB-Gain, der die Pose im Überlappungsbereich
+(beide Gewichte > Schwelle) auf die frontale Belichtung/Weißabgleich normiert
+(mittelwertbasiert, geclamped `[0.5, 2.0]`, Fallback `[1,1,1]` bei zu wenig
+Überlappung). Angewandt in beiden Modi (weighted + best-only). Toggle „View:
+match colours to frontal" (Default AN) bzw. CLI `--no-color-match`. Hinweis:
+`ml-wb` (commit 98b1e53) ist ein separates **Python-UNet** und läuft NICHT im
+Dart-Bake-Isolate → daher der deterministische Gain-Ansatz statt ml-wb.
+
+**Offen:** optional D (Occlusion/Tiefentest); ggf. Mean+Std- statt reinem
+Gain-Match, falls Nähte bleiben.
 
 ---
 

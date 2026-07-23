@@ -48,13 +48,22 @@ BakePose bakePoseWithCaps(BakePose pose, List<List<int>> loops) => BakePose(
 /// `n·v`), index-aligned with [BakePose.vertices]. See
 /// `domain/v3/view_weights.dart`.
 final class WeightedPose {
-  const WeightedPose({required this.pose, required this.weight});
+  const WeightedPose({
+    required this.pose,
+    required this.weight,
+    this.gain = const <double>[1, 1, 1],
+  });
 
   final BakePose pose;
 
   /// Per-vertex weight (0 = don't use this pose here), length ==
   /// `pose.vertices.length`.
   final List<double> weight;
+
+  /// Per-channel RGB multiplier applied to this pose's samples to match the
+  /// reference (frontal) exposure/white-balance. `[1,1,1]` = no correction.
+  /// See [TextureBaker.poseGain].
+  final List<double> gain;
 }
 
 /// Bakes the face texture (ARKit UV atlas) from the three poses: per texel →
@@ -198,10 +207,11 @@ final class TextureBaker {
             if (s == null) {
               continue;
             }
+            final List<double> g = poses[i].gain;
             accW += w;
-            accR += s.r * w;
-            accG += s.g * w;
-            accB += s.b * w;
+            accR += s.r * g[0] * w;
+            accG += s.g * g[1] * w;
+            accB += s.b * g[2] * w;
           }
           if (accW > 0) {
             colour = _Rgb(
@@ -224,7 +234,7 @@ final class TextureBaker {
               continue;
             }
             bestW = w;
-            colour = s;
+            colour = _applyGain(s, poses[i].gain);
           }
         }
 
@@ -327,6 +337,65 @@ final class TextureBaker {
     return _sampleBilinear(pose.image, pixel.x, pixel.y);
   }
 
+  /// Samples [pose]'s still at vertex [i] (project the face-local vertex →
+  /// bilinear). Null if outside the image / behind the camera.
+  _Rgb? _sampleVertex(BakePose pose, int i) {
+    if (i < 0 || i >= pose.vertices.length) {
+      return null;
+    }
+    final Vector2? pixel = pose.projection.projectPixel(pose.vertices[i]);
+    if (pixel == null) {
+      return null;
+    }
+    return _sampleBilinear(pose.image, pixel.x, pixel.y);
+  }
+
+  /// Per-channel RGB gain that best matches [pose]'s colours to [reference]
+  /// (frontal) over the vertices both poses see well — the overlap where their
+  /// weights exceed [minWeight]. This removes AE/AWB/exposure seams when the two
+  /// are stitched. Returns `[1,1,1]` (no correction) if the overlap is too small
+  /// ([minSamples]) or degenerate. Gains are clamped to `[minGain, maxGain]`.
+  List<double> poseGain({
+    required BakePose reference,
+    required BakePose pose,
+    required List<double> refWeight,
+    required List<double> poseWeight,
+    double minWeight = 0.02,
+    int minSamples = 50,
+    double minGain = 0.5,
+    double maxGain = 2.0,
+  }) {
+    double sr = 0, sg = 0, sb = 0; // reference sums
+    double pr = 0, pg = 0, pb = 0; // pose sums
+    int count = 0;
+    final int n = math.min(refWeight.length, poseWeight.length);
+    for (int i = 0; i < n; i++) {
+      if (refWeight[i] <= minWeight || poseWeight[i] <= minWeight) {
+        continue;
+      }
+      final _Rgb? rc = _sampleVertex(reference, i);
+      final _Rgb? pc = _sampleVertex(pose, i);
+      if (rc == null || pc == null) {
+        continue;
+      }
+      sr += rc.r;
+      sg += rc.g;
+      sb += rc.b;
+      pr += pc.r;
+      pg += pc.g;
+      pb += pc.b;
+      count++;
+    }
+    if (count < minSamples || pr <= 0 || pg <= 0 || pb <= 0) {
+      return const <double>[1, 1, 1];
+    }
+    return <double>[
+      (sr / pr).clamp(minGain, maxGain),
+      (sg / pg).clamp(minGain, maxGain),
+      (sb / pb).clamp(minGain, maxGain),
+    ];
+  }
+
   /// Picks the left or right side capture by which side's regions cover more of
   /// the triangle's vertices (matches merge_regions' per-vertex file choice).
   BakePose _pickSide(int a, int b, int c, BakePose left, BakePose right) {
@@ -345,6 +414,12 @@ final class TextureBaker {
 
   double _downWeight(int i, List<double> downWeight) =>
       (i >= 0 && i < downWeight.length) ? downWeight[i] : 0;
+
+  _Rgb _applyGain(_Rgb s, List<double> g) => _Rgb(
+        (s.r * g[0]).round().clamp(0, 255),
+        (s.g * g[1]).round().clamp(0, 255),
+        (s.b * g[2]).round().clamp(0, 255),
+      );
 
   _Rgb _lerp(_Rgb a, _Rgb b, double t) => _Rgb(
         (a.r + (b.r - a.r) * t).round().clamp(0, 255),

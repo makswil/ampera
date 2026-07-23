@@ -10,6 +10,7 @@
 //   --no-normals     flat-shaded, no smooth normals (A/B).
 //   --view-dependent normal-based (n·v) source selection (else region tables).
 //   --best           with --view-dependent: best pose only (no blend, sharper).
+//   --no-color-match with --view-dependent: skip matching poses to frontal.
 
 import 'dart:convert';
 import 'dart:io';
@@ -33,6 +34,7 @@ void main(List<String> args) {
   bool smoothNormals = true;
   bool viewDependent = false;
   bool bestOnly = false;
+  bool colorMatch = true;
   String? out;
   for (final String arg in args) {
     if (arg == '--flip') {
@@ -45,6 +47,8 @@ void main(List<String> args) {
       viewDependent = true;
     } else if (arg == '--best') {
       bestOnly = true;
+    } else if (arg == '--no-color-match') {
+      colorMatch = false;
     } else if (arg.startsWith('--size=')) {
       size = int.tryParse(arg.substring('--size='.length)) ?? size;
     } else if (arg.startsWith('--out=')) {
@@ -152,6 +156,7 @@ void main(List<String> args) {
           triangles: triangles,
           size: size,
           blend: !bestOnly,
+          colorMatch: colorMatch,
         )
       : const TextureBaker().bake(
           frontal: frontal,
@@ -199,6 +204,7 @@ img.Image _bakeViewDependent({
   required List<int> triangles,
   required int size,
   required bool blend,
+  required bool colorMatch,
 }) {
   final FaceGuardFrame frame = computeGuardFrame(
     verts: frontal.vertices,
@@ -214,18 +220,33 @@ img.Image _bakeViewDependent({
             poseAllowMask(verts: frontal.vertices, frame: frame, guard: guard),
       );
 
+  final List<double> wFrontal = weightsFor(frontal, PoseGuard.frontalCenter);
+  final List<double> wLeft = weightsFor(leftSource, PoseGuard.leftHalf);
+  final List<double> wRight = weightsFor(rightSource, PoseGuard.rightHalf);
+  final List<double>? wUp =
+      up == null ? null : weightsFor(up, PoseGuard.lowerHalf);
+
+  const TextureBaker baker = TextureBaker();
+  List<double> gainFor(BakePose pose, List<double> w) => colorMatch
+      ? baker.poseGain(
+          reference: frontal,
+          pose: pose,
+          refWeight: wFrontal,
+          poseWeight: w,
+        )
+      : const <double>[1, 1, 1];
+
   final List<WeightedPose> weighted = <WeightedPose>[
+    WeightedPose(pose: frontal, weight: wFrontal),
     WeightedPose(
-        pose: frontal, weight: weightsFor(frontal, PoseGuard.frontalCenter)),
+        pose: leftSource, weight: wLeft, gain: gainFor(leftSource, wLeft)),
     WeightedPose(
-        pose: leftSource, weight: weightsFor(leftSource, PoseGuard.leftHalf)),
-    WeightedPose(
-        pose: rightSource, weight: weightsFor(rightSource, PoseGuard.rightHalf)),
-    if (up != null)
-      WeightedPose(pose: up, weight: weightsFor(up, PoseGuard.lowerHalf)),
+        pose: rightSource, weight: wRight, gain: gainFor(rightSource, wRight)),
+    if (up != null && wUp != null)
+      WeightedPose(pose: up, weight: wUp, gain: gainFor(up, wUp)),
   ];
 
-  return const TextureBaker().bakeViewDependent(
+  return baker.bakeViewDependent(
     poses: weighted,
     uvs: uvs,
     triangles: triangles,

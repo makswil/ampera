@@ -81,4 +81,63 @@ void main() {
     expect(c.b, closeTo(85, 1));
     expect(c.b, greaterThan(0)); // proves it mixed
   });
+
+  group('poseGain', () {
+    test('matches a darker pose up to the reference (ratio gain)', () {
+      final List<double> gain = const TextureBaker().poseGain(
+        reference: _pose(_solid(150, 150, 150)),
+        pose: _pose(_solid(100, 100, 100)),
+        refWeight: <double>[1, 1, 1],
+        poseWeight: <double>[1, 1, 1],
+        minSamples: 1,
+      );
+      expect(gain[0], closeTo(1.5, 1e-6));
+      expect(gain[1], closeTo(1.5, 1e-6));
+      expect(gain[2], closeTo(1.5, 1e-6));
+    });
+
+    test('too little overlap → no correction ([1,1,1])', () {
+      final List<double> gain = const TextureBaker().poseGain(
+        reference: _pose(_solid(150, 150, 150)),
+        pose: _pose(_solid(100, 100, 100)),
+        refWeight: <double>[1, 1, 1],
+        poseWeight: <double>[0, 0, 0], // no overlap
+        minSamples: 1,
+      );
+      expect(gain, <double>[1, 1, 1]);
+    });
+
+    test('gain is clamped to the [0.5, 2.0] range', () {
+      final List<double> gain = const TextureBaker().poseGain(
+        reference: _pose(_solid(250, 250, 250)),
+        pose: _pose(_solid(50, 50, 50)), // raw ratio 5 → clamp 2
+        refWeight: <double>[1, 1, 1],
+        poseWeight: <double>[1, 1, 1],
+        minSamples: 1,
+      );
+      expect(gain[0], 2.0);
+    });
+  });
+
+  test('gain is applied to the chosen pose in best-only', () {
+    final List<WeightedPose> gained = <WeightedPose>[
+      WeightedPose(pose: _pose(_solid(10, 10, 10)), weight: <double>[0.1, 0.1, 0.1]),
+      WeightedPose(
+        pose: _pose(_solid(100, 100, 100)),
+        weight: <double>[1, 1, 1],
+        gain: <double>[2, 2, 2], // 100 * 2 = 200
+      ),
+    ];
+    final img.Image out = const TextureBaker().bakeViewDependent(
+      poses: gained,
+      uvs: uvs,
+      triangles: triangles,
+      textureSize: 4,
+      blend: false,
+    );
+    final ({int r, int g, int b}) c = firstCovered(out);
+    expect(c.r, 200);
+    expect(c.g, 200);
+    expect(c.b, 200);
+  });
 }

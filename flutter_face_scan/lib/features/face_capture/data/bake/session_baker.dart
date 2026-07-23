@@ -86,6 +86,7 @@ final class SessionTextureBaker {
     bool useChinUp = true,
     bool viewDependent = false,
     bool viewBlend = true,
+    bool colorMatch = true,
   }) async {
     // textureSize 0 = Original: match the frontal still's larger dimension
     // (clamped), so the atlas isn't the bottleneck.
@@ -100,6 +101,7 @@ final class SessionTextureBaker {
       useChinUp: useChinUp,
       viewDependent: viewDependent,
       viewBlend: viewBlend,
+      colorMatch: colorMatch,
     );
     if (request == null) {
       return null;
@@ -132,6 +134,7 @@ final class SessionTextureBaker {
     required bool useChinUp,
     required bool viewDependent,
     required bool viewBlend,
+    required bool colorMatch,
   }) {
     final Map<FacePose, CaptureSnapshot> byPose = <FacePose, CaptureSnapshot>{
       for (final CaptureSnapshot s in session.snapshots) s.pose: s,
@@ -166,6 +169,7 @@ final class SessionTextureBaker {
       flipSides: flipSides,
       viewDependent: viewDependent,
       viewBlend: viewBlend,
+      colorMatch: colorMatch,
     );
   }
 
@@ -221,6 +225,7 @@ final class _BakeRequest {
     required this.flipSides,
     required this.viewDependent,
     required this.viewBlend,
+    required this.colorMatch,
   });
 
   final _PoseInput frontal;
@@ -235,6 +240,7 @@ final class _BakeRequest {
   final bool flipSides;
   final bool viewDependent;
   final bool viewBlend;
+  final bool colorMatch;
 }
 
 final class _BakeResult {
@@ -305,6 +311,7 @@ _BakeResult _runBake(_BakeRequest r) {
           triangles: triangles,
           textureSize: r.textureSize,
           blend: r.viewBlend,
+          colorMatch: r.colorMatch,
         )
       : const TextureBaker().bake(
           frontal: frontal,
@@ -397,6 +404,7 @@ img.Image _bakeViewDependent({
   required List<int> triangles,
   required int textureSize,
   required bool blend,
+  required bool colorMatch,
 }) {
   final FaceGuardFrame frame = computeGuardFrame(
     verts: frontal.vertices,
@@ -422,16 +430,37 @@ img.Image _bakeViewDependent({
         allowed: allowed,
       );
 
-  // Frontal first → it's the fallback when no pose covers a texel.
+  final List<double> wFrontal = weightsFor(frontal, allowFrontal);
+  final List<double> wLeft = weightsFor(leftSource, allowLeft);
+  final List<double> wRight = weightsFor(rightSource, allowRight);
+  final List<double>? wUp =
+      upSource == null ? null : weightsFor(upSource, allowLower);
+
+  // Colour-match each non-frontal pose to frontal over their overlap, so the
+  // per-pose AE/AWB differences don't seam (essential for best-only).
+  const TextureBaker baker = TextureBaker();
+  List<double> gainFor(BakePose pose, List<double> w) => colorMatch
+      ? baker.poseGain(
+          reference: frontal,
+          pose: pose,
+          refWeight: wFrontal,
+          poseWeight: w,
+        )
+      : const <double>[1, 1, 1];
+
+  // Frontal first → it's the reference (identity gain) and the fallback when no
+  // pose covers a texel.
   final List<WeightedPose> poses = <WeightedPose>[
-    WeightedPose(pose: frontal, weight: weightsFor(frontal, allowFrontal)),
-    WeightedPose(pose: leftSource, weight: weightsFor(leftSource, allowLeft)),
-    WeightedPose(pose: rightSource, weight: weightsFor(rightSource, allowRight)),
-    if (upSource != null)
-      WeightedPose(pose: upSource, weight: weightsFor(upSource, allowLower)),
+    WeightedPose(pose: frontal, weight: wFrontal),
+    WeightedPose(
+        pose: leftSource, weight: wLeft, gain: gainFor(leftSource, wLeft)),
+    WeightedPose(
+        pose: rightSource, weight: wRight, gain: gainFor(rightSource, wRight)),
+    if (upSource != null && wUp != null)
+      WeightedPose(pose: upSource, weight: wUp, gain: gainFor(upSource, wUp)),
   ];
 
-  return const TextureBaker().bakeViewDependent(
+  return baker.bakeViewDependent(
     poses: poses,
     uvs: uvs,
     triangles: triangles,

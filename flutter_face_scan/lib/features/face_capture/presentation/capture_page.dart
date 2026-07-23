@@ -181,6 +181,15 @@ class _CapturePageState extends State<CapturePage> {
                   value: _debug.viewBestOnly,
                   onChanged: (bool v) => _debug.viewBestOnly = v,
                 ),
+                SwitchListTile(
+                  title: const Text('View: match colours to frontal'),
+                  subtitle: const Text(
+                    'On = normalise each pose to the frontal exposure/white '
+                    'balance (removes seams). Off = raw. Only view-dependent.',
+                  ),
+                  value: _debug.viewColorMatch,
+                  onChanged: (bool v) => _debug.viewColorMatch = v,
+                ),
                 if (_saved != null)
                   ListTile(
                     leading: _baking
@@ -276,6 +285,7 @@ class _CapturePageState extends State<CapturePage> {
         useChinUp: _debug.chinUpLowerFace,
         viewDependent: _debug.viewDependent,
         viewBlend: !_debug.viewBestOnly,
+        colorMatch: _debug.viewColorMatch,
       );
       if (mounted) {
         setState(() {

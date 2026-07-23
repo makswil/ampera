@@ -19,13 +19,15 @@ class DebugSettings extends ChangeNotifier {
     bool? chinUpLowerFace,
     bool? viewDependent,
     bool? viewBestOnly,
+    bool? viewColorMatch,
   }) : _showHud = showHud ?? kCaptureDebugHud,
        _showMesh = showMesh ?? kFaceMeshOverlay,
        _fillHoles = fillHoles ?? true,
        _hiResPhoto = hiResPhoto ?? false,
        _chinUpLowerFace = chinUpLowerFace ?? true,
        _viewDependent = viewDependent ?? false,
-       _viewBestOnly = viewBestOnly ?? false;
+       _viewBestOnly = viewBestOnly ?? false,
+       _viewColorMatch = viewColorMatch ?? true;
 
   bool _showHud;
   bool _showMesh;
@@ -34,6 +36,7 @@ class DebugSettings extends ChangeNotifier {
   bool _chinUpLowerFace;
   bool _viewDependent;
   bool _viewBestOnly;
+  bool _viewColorMatch;
 
   bool get showHud => _showHud;
   bool get showMesh => _showMesh;
@@ -62,6 +65,11 @@ class DebugSettings extends ChangeNotifier {
   /// winner switches). `false` (default) = weighted blend (smooth seams,
   /// slightly softer). Re-bake to apply.
   bool get viewBestOnly => _viewBestOnly;
+
+  /// Only relevant when [viewDependent] is on: `true` (default) = colour-match
+  /// each pose to frontal over their overlap (removes exposure/white-balance
+  /// seams). `false` = raw pose colours. Re-bake to apply.
+  bool get viewColorMatch => _viewColorMatch;
 
   set showHud(bool value) {
     if (value != _showHud) {
@@ -108,6 +116,13 @@ class DebugSettings extends ChangeNotifier {
   set viewBestOnly(bool value) {
     if (value != _viewBestOnly) {
       _viewBestOnly = value;
+      notifyListeners();
+    }
+  }
+
+  set viewColorMatch(bool value) {
+    if (value != _viewColorMatch) {
+      _viewColorMatch = value;
       notifyListeners();
     }
   }
