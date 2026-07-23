@@ -31,6 +31,18 @@ tap if the AVCapture variant misbehaves — app stays usable.
 **Risks:** camera-switch preview freeze (~100s ms) at capture; FOV/crop mismatch;
 ARKit resume continuity between poses.
 
+**Status (implemented):** AVCapture hi-res path live behind the Settings toggle.
+Native pre-warms the photo camera at scan start (no first-shot freeze) and waits
+for AE/AWB to converge before the shot (no cold "night-blue" cast). The photo is
+oriented `.right` + horizontally flipped to match ARKit's `capturedImage`
+convention (moles land on the correct side; side-pose samples stay on-face).
+
+**Follow-up (later, not urgent):** nose region still looks slightly warped in the
+baked texture. Much improved after the mirror fix; likely residual FOV/crop
+difference between ARKit video and the AVCapture photo (check the on-device
+`[face_scan] FOV check` log) or normal 2D→3D projection. Revisit once evaluated
+on the 3D model; may need intrinsics-based correction.
+
 ## Depth normal map — secondary
 
 Normal/displacement map from the TrueDepth depth frame for geometric relief

@@ -88,3 +88,23 @@ abstract final class FaceSymmetryAxis {
   /// Bottommost reference vertex (chin).
   static int get chinVertex => ordered.last;
 }
+
+/// A **horizontal** reference axis running across the face (roughly cheek → nose
+/// base → cheek), used to split the lower face (under-nose, lips, chin, jaw
+/// underside) from the upper face. The bake sources everything below this line
+/// from the chin-up ([FacePose.up]) still, which sees those grazing-angle areas
+/// head-on instead of stretched.
+///
+/// Like [FaceSymmetryAxis], the indices were derived empirically from on-device
+/// TrueDepth captures — isolated here so they can be revised in one place.
+abstract final class FaceHorizontalAxis {
+  const FaceHorizontalAxis._();
+
+  /// Indices of the horizontal split line (order is not significant; only the
+  /// vertices' mean height is used as the upper/lower boundary).
+  static const List<int> ordered = <int>[
+    295, 931, 939, 464, 463, 390, 354, 152, 151, 320, 436, 313, 292, 298, 143,
+    137, 444, 362, 156, 9, 605, 793, 872, 586, 592, 733, 727, 748, 864, 755,
+    600, 601, 785, 821, 1044, 1027, 1008, 1000, 730,
+  ];
+}

@@ -5,9 +5,11 @@
 //   dart run tool/bake_texture.dart <session_dir> [--size=2048] [--flip] \
 //       [--no-holes] [--no-normals] [--out=<basename>]
 //
-//   --flip        swap left/right side source (if cheeks look mirrored).
-//   --no-holes    leave ARKit's open eye/mouth holes (default caps them).
-//   --no-normals  flat-shaded, no smooth normals (A/B).
+//   --flip           swap left/right side source (if cheeks look mirrored).
+//   --no-holes       leave ARKit's open eye/mouth holes (default caps them).
+//   --no-normals     flat-shaded, no smooth normals (A/B).
+//   --view-dependent normal-based (n·v) source selection (else region tables).
+//   --best           with --view-dependent: best pose only (no blend, sharper).
 
 import 'dart:convert';
 import 'dart:io';
@@ -17,9 +19,11 @@ import 'package:vector_math/vector_math_64.dart';
 
 import 'package:flutter_face_scan/features/face_capture/data/bake/obj_writer.dart';
 import 'package:flutter_face_scan/features/face_capture/data/bake/texture_baker.dart';
+import 'package:flutter_face_scan/features/face_capture/domain/constants/face_vertex_indices.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/v3/hole_filler.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/v3/texture_projection.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/v3/vertex_normals.dart';
+import 'package:flutter_face_scan/features/face_capture/domain/v3/view_weights.dart';
 
 void main(List<String> args) {
   final List<String> positional = <String>[];
@@ -27,6 +31,8 @@ void main(List<String> args) {
   bool flip = false;
   bool fillHoles = true;
   bool smoothNormals = true;
+  bool viewDependent = false;
+  bool bestOnly = false;
   String? out;
   for (final String arg in args) {
     if (arg == '--flip') {
@@ -35,6 +41,10 @@ void main(List<String> args) {
       fillHoles = false;
     } else if (arg == '--no-normals') {
       smoothNormals = false;
+    } else if (arg == '--view-dependent') {
+      viewDependent = true;
+    } else if (arg == '--best') {
+      bestOnly = true;
     } else if (arg.startsWith('--size=')) {
       size = int.tryParse(arg.substring('--size='.length)) ?? size;
     } else if (arg.startsWith('--out=')) {
@@ -51,12 +61,14 @@ void main(List<String> args) {
     smoothNormals ? 'smooth' : 'flat',
     fillHoles ? 'filled' : 'holes',
     if (flip) 'flip',
+    if (viewDependent) bestOnly ? 'ndotv-best' : 'ndotv',
     '${size}px',
   ].join('_');
   if (positional.isEmpty) {
     stderr.writeln(
       'Usage: dart run tool/bake_texture.dart <session_dir> '
-      '[--size=2048] [--flip] [--no-holes] [--no-normals] [--out=model]',
+      '[--size=2048] [--flip] [--no-holes] [--no-normals] '
+      '[--view-dependent] [--best] [--out=model]',
     );
     exit(64);
   }
@@ -86,6 +98,8 @@ void main(List<String> args) {
   BakePose frontal = _loadPose(dir, poses['frontal'], frontalPly);
   BakePose left40 = _loadPose(dir, poses['left40']);
   BakePose right40 = _loadPose(dir, poses['right40']);
+  // Chin-up is optional (older sessions lack it); only used view-dependent.
+  BakePose? up = poses['up'] == null ? null : _loadPose(dir, poses['up']);
 
   List<double> texUvs = uvs;
   List<int> triangles = frontalPly.faces;
@@ -105,6 +119,9 @@ void main(List<String> args) {
       frontal = bakePoseWithCaps(frontal, loops);
       left40 = bakePoseWithCaps(left40, loops);
       right40 = bakePoseWithCaps(right40, loops);
+      if (up != null) {
+        up = bakePoseWithCaps(up, loops);
+      }
       capLoops = loops;
     }
   }
@@ -113,23 +130,41 @@ void main(List<String> args) {
   final BakePose leftSource = flip ? left40 : right40;
   final BakePose rightSource = flip ? right40 : left40;
 
-  final img.Image texture = const TextureBaker().bake(
-    frontal: frontal,
-    left: leftSource,
-    right: rightSource,
-    uvs: texUvs,
-    triangles: triangles,
-    textureSize: size,
-  );
-
-  // Smooth (Gouraud) shading. Normals from the ORIGINAL triangles so cap faces
-  // don't crease the rim; cap centroids get the mean of their rim normals.
+  // Normals from the ORIGINAL triangles so cap faces don't crease the rim; cap
+  // centroids get the mean of their rim normals. Needed for smooth shading AND
+  // the view-dependent weighting.
   List<Vector3> normals = const <Vector3>[];
-  if (smoothNormals) {
+  if (smoothNormals || viewDependent) {
     normals = computeVertexNormals(frontal.vertices, frontalPly.faces);
     if (capLoops.isNotEmpty) {
       assignCapNormals(normals, capLoops, capBase);
     }
+  }
+
+  final img.Image texture = viewDependent
+      ? _bakeViewDependent(
+          frontal: frontal,
+          leftSource: leftSource,
+          rightSource: rightSource,
+          up: up,
+          normals: normals,
+          uvs: texUvs,
+          triangles: triangles,
+          size: size,
+          blend: !bestOnly,
+        )
+      : const TextureBaker().bake(
+          frontal: frontal,
+          left: leftSource,
+          right: rightSource,
+          uvs: texUvs,
+          triangles: triangles,
+          textureSize: size,
+        );
+
+  // Smooth (Gouraud) shading: only emit normals to the OBJ when requested.
+  if (!smoothNormals) {
+    normals = const <Vector3>[];
   }
 
   final String pngName = '$out.png';
@@ -153,6 +188,52 @@ void main(List<String> args) {
     ..writeln('Wrote ${dir.path}/$out.obj (+ .mtl, .png) — open in MeshLab.');
 }
 
+/// View-dependent (`n·v`) bake — mirrors `session_baker._bakeViewDependent`.
+img.Image _bakeViewDependent({
+  required BakePose frontal,
+  required BakePose leftSource,
+  required BakePose rightSource,
+  required BakePose? up,
+  required List<Vector3> normals,
+  required List<double> uvs,
+  required List<int> triangles,
+  required int size,
+  required bool blend,
+}) {
+  final FaceGuardFrame frame = computeGuardFrame(
+    verts: frontal.vertices,
+    symmetryAxis: FaceSymmetryAxis.ordered,
+    horizontalAxis: FaceHorizontalAxis.ordered,
+  );
+  List<double> weightsFor(BakePose pose, PoseGuard guard) => viewFacingWeights(
+        faceLocalVerts: pose.vertices,
+        localNormals: normals,
+        viewMatrix: pose.viewMatrix,
+        faceTransform: pose.faceTransform,
+        allowed:
+            poseAllowMask(verts: frontal.vertices, frame: frame, guard: guard),
+      );
+
+  final List<WeightedPose> weighted = <WeightedPose>[
+    WeightedPose(
+        pose: frontal, weight: weightsFor(frontal, PoseGuard.frontalCenter)),
+    WeightedPose(
+        pose: leftSource, weight: weightsFor(leftSource, PoseGuard.leftHalf)),
+    WeightedPose(
+        pose: rightSource, weight: weightsFor(rightSource, PoseGuard.rightHalf)),
+    if (up != null)
+      WeightedPose(pose: up, weight: weightsFor(up, PoseGuard.lowerHalf)),
+  ];
+
+  return const TextureBaker().bakeViewDependent(
+    poses: weighted,
+    uvs: uvs,
+    triangles: triangles,
+    textureSize: size,
+    blend: blend,
+  );
+}
+
 BakePose _loadPose(Directory dir, Map<String, dynamic>? pose, [_Ply? preloaded]) {
   if (pose == null) {
     throw StateError('Missing pose in manifest (need frontal/left40/right40).');
@@ -167,6 +248,9 @@ BakePose _loadPose(Directory dir, Map<String, dynamic>? pose, [_Ply? preloaded])
     throw StateError('Could not decode ${pose['imageFile']}.');
   }
 
+  final Matrix4 viewMatrix = Matrix4.fromList(_doubles(still['viewMatrix']));
+  final Matrix4 faceTransform =
+      Matrix4.fromList(_doubles(still['faceTransform']));
   return BakePose(
     image: image,
     vertices: ply.verts
@@ -175,10 +259,12 @@ BakePose _loadPose(Directory dir, Map<String, dynamic>? pose, [_Ply? preloaded])
     projection: PoseProjection(
       width: (still['width'] as num).toInt(),
       height: (still['height'] as num).toInt(),
-      viewMatrix: Matrix4.fromList(_doubles(still['viewMatrix'])),
+      viewMatrix: viewMatrix,
       projectionMatrix: Matrix4.fromList(_doubles(still['projectionMatrix'])),
-      faceTransform: Matrix4.fromList(_doubles(still['faceTransform'])),
+      faceTransform: faceTransform,
     ),
+    viewMatrix: viewMatrix,
+    faceTransform: faceTransform,
   );
 }
 

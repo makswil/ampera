@@ -8,20 +8,31 @@ import '../../domain/v3/hole_filler.dart';
 import '../../domain/v3/texture_projection.dart';
 
 /// One pose ready for baking: RGB still, its face-local vertices (index-aligned
-/// across poses), and the projection into that still.
+/// across poses), the projection into that still, and the raw view/face
+/// matrices needed for view-dependent (`n·v`) weighting.
 final class BakePose {
   BakePose({
     required this.image,
     required this.vertices,
     required this.projection,
+    required this.viewMatrix,
+    required this.faceTransform,
   });
 
   final img.Image image;
   final List<Vector3> vertices;
   final PoseProjection projection;
+
+  /// World→camera (column-major, `vector_math_64`); camera world position is its
+  /// inverse's translation.
+  final Matrix4 viewMatrix;
+
+  /// Face-local→world, rigid (rotation+translation, no scale) → the rotation
+  /// part maps face-local normals to world.
+  final Matrix4 faceTransform;
 }
 
-/// [pose] with the per-loop cap centroid vertices appended (same image/projection).
+/// [pose] with the per-loop cap centroid vertices appended (same image/matrices).
 BakePose bakePoseWithCaps(BakePose pose, List<List<int>> loops) => BakePose(
       image: pose.image,
       vertices: <Vector3>[
@@ -29,7 +40,22 @@ BakePose bakePoseWithCaps(BakePose pose, List<List<int>> loops) => BakePose(
         ...capVertices(loops, pose.vertices),
       ],
       projection: pose.projection,
+      viewMatrix: pose.viewMatrix,
+      faceTransform: pose.faceTransform,
     );
+
+/// A [BakePose] paired with its per-vertex view-dependent weight (guarded
+/// `n·v`), index-aligned with [BakePose.vertices]. See
+/// `domain/v3/view_weights.dart`.
+final class WeightedPose {
+  const WeightedPose({required this.pose, required this.weight});
+
+  final BakePose pose;
+
+  /// Per-vertex weight (0 = don't use this pose here), length ==
+  /// `pose.vertices.length`.
+  final List<double> weight;
+}
 
 /// Bakes the face texture (ARKit UV atlas) from the three poses: per texel →
 /// covering triangle → face-local point → project into the photos → blend
@@ -44,6 +70,8 @@ final class TextureBaker {
     required List<double> uvs,
     required List<int> triangles,
     int textureSize = 2048,
+    BakePose? up,
+    List<double> downWeight = const <double>[],
   }) {
     final img.Image out = img.Image(
       width: textureSize,
@@ -64,11 +92,155 @@ final class TextureBaker {
       if (a >= uvPx.length || b >= uvPx.length || c >= uvPx.length) {
         continue;
       }
-      _rasterizeTriangle(out, frontal, left, right, uvPx[a], uvPx[b], uvPx[c],
-          a, b, c, textureSize);
+      _rasterizeTriangle(out, frontal, left, right, up, downWeight, uvPx[a],
+          uvPx[b], uvPx[c], a, b, c, textureSize);
     }
 
     return out;
+  }
+
+  /// View-dependent bake: per texel, choose colour from [poses] by their
+  /// per-vertex weight (guarded `n·v`). Replaces the static region tables.
+  ///
+  /// [blend] `true` (default) = weighted average across the poses that cover the
+  /// texel (smooth seams, slightly softer). `false` = best-only: take the single
+  /// highest-weight pose (maximally sharp, but visible seams where the winner
+  /// switches — pair with colour matching). The FIRST pose is the fallback
+  /// (frontal) when no pose has weight there. Pure.
+  img.Image bakeViewDependent({
+    required List<WeightedPose> poses,
+    required List<double> uvs,
+    required List<int> triangles,
+    int textureSize = 2048,
+    bool blend = true,
+  }) {
+    final img.Image out = img.Image(
+      width: textureSize,
+      height: textureSize,
+      numChannels: 4,
+    );
+    if (poses.isEmpty) {
+      return out;
+    }
+
+    final List<Vector2> uvPx = <Vector2>[
+      for (int i = 0; i + 1 < uvs.length; i += 2)
+        Vector2(uvs[i] * textureSize, uvs[i + 1] * textureSize),
+    ];
+
+    for (int t = 0; t + 2 < triangles.length; t += 3) {
+      final int a = triangles[t];
+      final int b = triangles[t + 1];
+      final int c = triangles[t + 2];
+      if (a >= uvPx.length || b >= uvPx.length || c >= uvPx.length) {
+        continue;
+      }
+      _rasterizeViewDependent(
+          out, poses, uvPx[a], uvPx[b], uvPx[c], a, b, c, textureSize, blend);
+    }
+
+    return out;
+  }
+
+  void _rasterizeViewDependent(
+    img.Image out,
+    List<WeightedPose> poses,
+    Vector2 uvA,
+    Vector2 uvB,
+    Vector2 uvC,
+    int a,
+    int b,
+    int c,
+    int size,
+    bool blend,
+  ) {
+    final int minX = math.max(0, _floor3(uvA.x, uvB.x, uvC.x));
+    final int maxX = math.min(size - 1, _ceil3(uvA.x, uvB.x, uvC.x));
+    final int minY = math.max(0, _floor3(uvA.y, uvB.y, uvC.y));
+    final int maxY = math.min(size - 1, _ceil3(uvA.y, uvB.y, uvC.y));
+    if (minX > maxX || minY > maxY) {
+      return;
+    }
+
+    // Per-pose vertex weights for this triangle (interpolated per texel below).
+    final int n = poses.length;
+    final List<double> wA = List<double>.filled(n, 0);
+    final List<double> wB = List<double>.filled(n, 0);
+    final List<double> wC = List<double>.filled(n, 0);
+    for (int i = 0; i < n; i++) {
+      final List<double> w = poses[i].weight;
+      wA[i] = a < w.length ? w[a] : 0;
+      wB[i] = b < w.length ? w[b] : 0;
+      wC[i] = c < w.length ? w[c] : 0;
+    }
+
+    for (int py = minY; py <= maxY; py++) {
+      for (int px = minX; px <= maxX; px++) {
+        final Vector2 p = Vector2(px + 0.5, py + 0.5);
+        final Vector3? bc = barycentric(p, uvA, uvB, uvC);
+        if (bc == null || bc.x < 0 || bc.y < 0 || bc.z < 0) {
+          continue;
+        }
+
+        _Rgb? colour;
+        if (blend) {
+          // Weighted average across all covering poses.
+          double accW = 0;
+          double accR = 0;
+          double accG = 0;
+          double accB = 0;
+          for (int i = 0; i < n; i++) {
+            final double w = bc.x * wA[i] + bc.y * wB[i] + bc.z * wC[i];
+            if (w <= 0) {
+              continue;
+            }
+            final _Rgb? s = _sampleFace(poses[i].pose, bc, a, b, c);
+            if (s == null) {
+              continue;
+            }
+            accW += w;
+            accR += s.r * w;
+            accG += s.g * w;
+            accB += s.b * w;
+          }
+          if (accW > 0) {
+            colour = _Rgb(
+              (accR / accW).round().clamp(0, 255),
+              (accG / accW).round().clamp(0, 255),
+              (accB / accW).round().clamp(0, 255),
+            );
+          }
+        } else {
+          // Best-only: highest-weight pose that yields a sample (no mixing →
+          // full sharpness). Ties/misses fall through to the next best.
+          double bestW = 0;
+          for (int i = 0; i < n; i++) {
+            final double w = bc.x * wA[i] + bc.y * wB[i] + bc.z * wC[i];
+            if (w <= bestW) {
+              continue;
+            }
+            final _Rgb? s = _sampleFace(poses[i].pose, bc, a, b, c);
+            if (s == null) {
+              continue;
+            }
+            bestW = w;
+            colour = s;
+          }
+        }
+
+        if (colour != null) {
+          out.setPixelRgba(px, py, colour.r, colour.g, colour.b, 255);
+          continue;
+        }
+
+        // No pose covers this texel (all guarded off / grazing / off-image):
+        // fall back to the first (frontal) pose so we don't leave a hole.
+        final _Rgb? fallback = _sampleFace(poses.first.pose, bc, a, b, c);
+        if (fallback != null) {
+          out.setPixelRgba(px, py, fallback.r, fallback.g, fallback.b, 255);
+        }
+      }
+    }
   }
 
   void _rasterizeTriangle(
@@ -76,6 +248,8 @@ final class TextureBaker {
     BakePose frontal,
     BakePose left,
     BakePose right,
+    BakePose? up,
+    List<double> downWeight,
     Vector2 uvA,
     Vector2 uvB,
     Vector2 uvC,
@@ -98,6 +272,11 @@ final class TextureBaker {
     final double wc = _sideWeight(c);
     final BakePose side = _pickSide(a, b, c, left, right);
 
+    // Per-texel blend weight (result↔chin-up) for the lower/under-face region.
+    final double da = _downWeight(a, downWeight);
+    final double db = _downWeight(b, downWeight);
+    final double dc = _downWeight(c, downWeight);
+
     for (int py = minY; py <= maxY; py++) {
       for (int px = minX; px <= maxX; px++) {
         final Vector2 p = Vector2(px + 0.5, py + 0.5);
@@ -117,6 +296,16 @@ final class TextureBaker {
           final _Rgb? sideColour = _sampleFace(side, bc, a, b, c);
           if (sideColour != null) {
             colour = _lerp(front, sideColour, w);
+          }
+        }
+
+        // Pull the under-nose / lips / chin from the chin-up still (applied
+        // after the side blend so the cheeks/jaw keep their side source).
+        final double wd = bc.x * da + bc.y * db + bc.z * dc;
+        if (up != null && wd > 0) {
+          final _Rgb? upColour = _sampleFace(up, bc, a, b, c);
+          if (upColour != null) {
+            colour = _lerp(colour, upColour, wd);
           }
         }
 
@@ -153,6 +342,9 @@ final class TextureBaker {
 
   double _sideWeight(int i) =>
       (i >= 0 && i < FaceRegions.sideWeight.length) ? FaceRegions.sideWeight[i] : 0;
+
+  double _downWeight(int i, List<double> downWeight) =>
+      (i >= 0 && i < downWeight.length) ? downWeight[i] : 0;
 
   _Rgb _lerp(_Rgb a, _Rgb b, double t) => _Rgb(
         (a.r + (b.r - a.r) * t).round().clamp(0, 255),

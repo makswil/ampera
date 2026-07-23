@@ -29,6 +29,7 @@ abstract final class PoseGuidanceCopy {
       FacePose.frontal => 'Look straight at the camera',
       FacePose.left40 => 'Slowly turn 45° to your left',
       FacePose.right40 => 'Slowly turn 45° to your right',
+      FacePose.up => 'Tilt your head back — lift your chin',
     };
   }
 }

@@ -46,7 +46,7 @@ final class GuidedPoseValidator implements PoseValidator {
 
     final EulerAngles angles = observation.eulerAngles;
     final double yawError = angles.yaw - pose.targetYaw;
-    final double pitchError = angles.pitch;
+    final double pitchError = angles.pitch - pose.targetPitch;
 
     final SymmetryAxis? axis = _axisExtractor.extract(observation);
     final double axisTilt = axis?.tiltDegrees ?? double.nan;

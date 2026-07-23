@@ -101,9 +101,17 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
 
   /// Portrait JPEG + its projection for the current frame (see [StillCapture]);
   /// null if no frame / no tracked face. ARKit-backend capability.
-  Future<StillCapture?> captureStill() async {
+  ///
+  /// When [hiRes] is true, native pauses ARKit, shoots a full-res AVCapture photo
+  /// (front TrueDepth, ~7 MP) registered with ARKit's view/projection matrices,
+  /// then resumes ARKit. Falls back to the ARKit video-res still on any failure,
+  /// so a pose is never lost. Defaults to the stable ARKit video path.
+  Future<StillCapture?> captureStill({bool hiRes = false}) async {
     final Map<Object?, Object?>? raw =
-        await _control.invokeMethod<Map<Object?, Object?>>('captureStill');
+        await _control.invokeMethod<Map<Object?, Object?>>(
+      'captureStill',
+      <String, Object?>{'hiRes': hiRes},
+    );
     if (raw == null) {
       return null;
     }

@@ -67,7 +67,8 @@ class _CapturePageState extends State<CapturePage> {
   Future<void> _stillChain = Future<void>.value();
 
   Future<void> _grabStill(FacePose pose) async {
-    final StillCapture? still = await _trackingService.captureStill();
+    final StillCapture? still =
+        await _trackingService.captureStill(hiRes: _debug.hiResPhoto);
     if (still != null && still.bytes.isNotEmpty) {
       _stills[pose] = still;
     }
@@ -142,6 +143,43 @@ class _CapturePageState extends State<CapturePage> {
                   subtitle: const Text('Off = leave ARKit holes in the model'),
                   value: _debug.fillHoles,
                   onChanged: (bool v) => _debug.fillHoles = v,
+                ),
+                SwitchListTile(
+                  title: const Text('Texture: AVCapture hi-res'),
+                  subtitle: const Text(
+                    'On = 7 MP photo per pose (sharper). '
+                    'Off = ARKit video (stable) — tap back if it misbehaves.',
+                  ),
+                  value: _debug.hiResPhoto,
+                  onChanged: (bool v) => _debug.hiResPhoto = v,
+                ),
+                SwitchListTile(
+                  title: const Text('Chin-up for lower face'),
+                  subtitle: const Text(
+                    'On = chin/jaw from the chin-up pose. '
+                    'Off = frontal only (turn off if the nose ghosts).',
+                  ),
+                  value: _debug.chinUpLowerFace,
+                  onChanged: (bool v) => _debug.chinUpLowerFace = v,
+                ),
+                SwitchListTile(
+                  title: const Text('View-dependent blend (n·v)'),
+                  subtitle: const Text(
+                    'On = pick the photo that saw each surface most head-on. '
+                    'Off = static region tables (current). Re-bake to apply.',
+                  ),
+                  value: _debug.viewDependent,
+                  onChanged: (bool v) => _debug.viewDependent = v,
+                ),
+                SwitchListTile(
+                  title: const Text('View: best pose only (sharper)'),
+                  subtitle: const Text(
+                    'On = take the single best photo per point (no mixing → '
+                    'sharpest, but seams). Off = weighted blend. '
+                    'Only affects view-dependent.',
+                  ),
+                  value: _debug.viewBestOnly,
+                  onChanged: (bool v) => _debug.viewBestOnly = v,
                 ),
                 if (_saved != null)
                   ListTile(
@@ -235,6 +273,9 @@ class _CapturePageState extends State<CapturePage> {
         directory: dir,
         fillHoles: _debug.fillHoles,
         textureSize: 0, // 0 = Original (source photo resolution)
+        useChinUp: _debug.chinUpLowerFace,
+        viewDependent: _debug.viewDependent,
+        viewBlend: !_debug.viewBestOnly,
       );
       if (mounted) {
         setState(() {

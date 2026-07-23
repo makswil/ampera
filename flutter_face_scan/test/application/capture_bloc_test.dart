@@ -83,7 +83,8 @@ void main() {
   FaceObservation frame() =>
       observationOnLine(eulerAngles: const EulerAngles.zero());
 
-  test('captures all three poses after holding each for the duration', () async {
+  test('captures the full pose sequence after holding each for the duration',
+      () async {
     final CaptureBloc bloc = buildBloc(_ScriptedValidator(true));
 
     bloc.add(const CaptureStarted());
@@ -100,11 +101,10 @@ void main() {
     }
 
     expect(bloc.state.status, CaptureStatus.completed);
-    expect(bloc.state.snapshots.map((s) => s.pose).toList(), <FacePose>[
-      FacePose.frontal,
-      FacePose.left40,
-      FacePose.right40,
-    ]);
+    expect(
+      bloc.state.snapshots.map((s) => s.pose).toList(),
+      FacePose.captureSequence,
+    );
     // Camera stays live on completion (preview not frozen); only stopped on close.
     expect(service.stopped, isFalse);
     await bloc.close();
