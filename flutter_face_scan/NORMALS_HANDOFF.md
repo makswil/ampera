@@ -46,8 +46,15 @@ match colours to frontal" (Default AN) bzw. CLI `--no-color-match`. Hinweis:
 `ml-wb` (commit 98b1e53) ist ein separates **Python-UNet** und läuft NICHT im
 Dart-Bake-Isolate → daher der deterministische Gain-Ansatz statt ml-wb.
 
+Zwei Farb-Referenz-Modi (Toggle „View: neutral colour target" / CLI
+`--wb-neutral`): **frontal** (Default, `TextureBaker.poseGain` über Überlappung)
+oder **neutral** (`session_baker._poseGains` + `TextureBaker.poseMeanColor`/
+`gainToTarget`: alle Posen inkl. frontal auf ihren gemeinsamen Mittelwert). Der
+neutral-Modus ist der deterministische In-App-Ersatz für „alle auf ml-wb-Default"
+(echtes ml-wb wäre ein Offline-Python-Preprocessing der 4 JPEGs, kein Isolate-Bake).
+
 **Offen:** optional D (Occlusion/Tiefentest); ggf. Mean+Std- statt reinem
-Gain-Match, falls Nähte bleiben.
+Gain-Match, falls Nähte bleiben; optional ml-wb offline im Tool verdrahten.
 
 ---
 

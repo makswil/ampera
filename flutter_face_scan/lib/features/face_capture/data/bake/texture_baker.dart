@@ -396,6 +396,53 @@ final class TextureBaker {
     ];
   }
 
+  /// Mean RGB of [pose] over the vertices it uses (weight > [minWeight]). Null if
+  /// fewer than [minSamples] usable vertices. Used for the "neutral" white-
+  /// balance mode (normalise every pose to a shared target instead of frontal).
+  List<double>? poseMeanColor({
+    required BakePose pose,
+    required List<double> weight,
+    double minWeight = 0.02,
+    int minSamples = 50,
+  }) {
+    double sr = 0, sg = 0, sb = 0;
+    int count = 0;
+    for (int i = 0; i < weight.length; i++) {
+      if (weight[i] <= minWeight) {
+        continue;
+      }
+      final _Rgb? c = _sampleVertex(pose, i);
+      if (c == null) {
+        continue;
+      }
+      sr += c.r;
+      sg += c.g;
+      sb += c.b;
+      count++;
+    }
+    if (count < minSamples) {
+      return null;
+    }
+    return <double>[sr / count, sg / count, sb / count];
+  }
+
+  /// Per-channel gain mapping [mean] → [target], clamped to `[minGain, maxGain]`.
+  /// Identity if either is degenerate.
+  static List<double> gainToTarget(
+    List<double> mean,
+    List<double> target, {
+    double minGain = 0.5,
+    double maxGain = 2.0,
+  }) {
+    final List<double> g = <double>[1, 1, 1];
+    for (int c = 0; c < 3; c++) {
+      if (mean[c] > 0 && target[c] > 0) {
+        g[c] = (target[c] / mean[c]).clamp(minGain, maxGain);
+      }
+    }
+    return g;
+  }
+
   /// Picks the left or right side capture by which side's regions cover more of
   /// the triangle's vertices (matches merge_regions' per-vertex file choice).
   BakePose _pickSide(int a, int b, int c, BakePose left, BakePose right) {

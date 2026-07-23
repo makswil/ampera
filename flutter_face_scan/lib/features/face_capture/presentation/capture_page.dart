@@ -190,6 +190,15 @@ class _CapturePageState extends State<CapturePage> {
                   value: _debug.viewColorMatch,
                   onChanged: (bool v) => _debug.viewColorMatch = v,
                 ),
+                SwitchListTile(
+                  title: const Text('View: neutral colour target'),
+                  subtitle: const Text(
+                    'On = normalise all poses to their shared average (incl. '
+                    'frontal). Off = match to frontal. Needs colour match on.',
+                  ),
+                  value: _debug.viewColorNeutral,
+                  onChanged: (bool v) => _debug.viewColorNeutral = v,
+                ),
                 if (_saved != null)
                   ListTile(
                     leading: _baking
@@ -286,6 +295,7 @@ class _CapturePageState extends State<CapturePage> {
         viewDependent: _debug.viewDependent,
         viewBlend: !_debug.viewBestOnly,
         colorMatch: _debug.viewColorMatch,
+        colorMatchNeutral: _debug.viewColorNeutral,
       );
       if (mounted) {
         setState(() {

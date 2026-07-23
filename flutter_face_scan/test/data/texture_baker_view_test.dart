@@ -119,6 +119,41 @@ void main() {
     });
   });
 
+  group('neutral white balance (poseMeanColor + gainToTarget)', () {
+    test('poseMeanColor returns the mean over used vertices', () {
+      final List<double>? mean = const TextureBaker().poseMeanColor(
+        pose: _pose(_solid(120, 60, 30)),
+        weight: <double>[1, 1, 1],
+        minSamples: 1,
+      );
+      expect(mean, isNotNull);
+      expect(mean![0], closeTo(120, 1e-9));
+      expect(mean[1], closeTo(60, 1e-9));
+      expect(mean[2], closeTo(30, 1e-9));
+    });
+
+    test('poseMeanColor is null when there are too few used vertices', () {
+      final List<double>? mean = const TextureBaker().poseMeanColor(
+        pose: _pose(_solid(120, 60, 30)),
+        weight: <double>[0, 0, 0], // nothing used
+        minSamples: 1,
+      );
+      expect(mean, isNull);
+    });
+
+    test('gainToTarget maps a mean onto the shared target (clamped)', () {
+      expect(
+        TextureBaker.gainToTarget(<double>[100, 100, 100], <double>[150, 150, 150]),
+        <double>[1.5, 1.5, 1.5],
+      );
+      // Ratio 3 → clamped to 2.0.
+      expect(
+        TextureBaker.gainToTarget(<double>[50, 50, 50], <double>[150, 150, 150])[0],
+        2.0,
+      );
+    });
+  });
+
   test('gain is applied to the chosen pose in best-only', () {
     final List<WeightedPose> gained = <WeightedPose>[
       WeightedPose(pose: _pose(_solid(10, 10, 10)), weight: <double>[0.1, 0.1, 0.1]),

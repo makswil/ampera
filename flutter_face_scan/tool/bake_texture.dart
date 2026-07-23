@@ -11,6 +11,8 @@
 //   --view-dependent normal-based (n·v) source selection (else region tables).
 //   --best           with --view-dependent: best pose only (no blend, sharper).
 //   --no-color-match with --view-dependent: skip matching poses to frontal.
+//   --wb-neutral     with --view-dependent: match all poses to their shared
+//                    average colour instead of to frontal.
 
 import 'dart:convert';
 import 'dart:io';
@@ -35,6 +37,7 @@ void main(List<String> args) {
   bool viewDependent = false;
   bool bestOnly = false;
   bool colorMatch = true;
+  bool colorNeutral = false;
   String? out;
   for (final String arg in args) {
     if (arg == '--flip') {
@@ -49,6 +52,8 @@ void main(List<String> args) {
       bestOnly = true;
     } else if (arg == '--no-color-match') {
       colorMatch = false;
+    } else if (arg == '--wb-neutral') {
+      colorNeutral = true;
     } else if (arg.startsWith('--size=')) {
       size = int.tryParse(arg.substring('--size='.length)) ?? size;
     } else if (arg.startsWith('--out=')) {
@@ -157,6 +162,7 @@ void main(List<String> args) {
           size: size,
           blend: !bestOnly,
           colorMatch: colorMatch,
+          colorNeutral: colorNeutral,
         )
       : const TextureBaker().bake(
           frontal: frontal,
@@ -205,6 +211,7 @@ img.Image _bakeViewDependent({
   required int size,
   required bool blend,
   required bool colorMatch,
+  required bool colorNeutral,
 }) {
   final FaceGuardFrame frame = computeGuardFrame(
     verts: frontal.vertices,
@@ -220,30 +227,31 @@ img.Image _bakeViewDependent({
             poseAllowMask(verts: frontal.vertices, frame: frame, guard: guard),
       );
 
-  final List<double> wFrontal = weightsFor(frontal, PoseGuard.frontalCenter);
-  final List<double> wLeft = weightsFor(leftSource, PoseGuard.leftHalf);
-  final List<double> wRight = weightsFor(rightSource, PoseGuard.rightHalf);
-  final List<double>? wUp =
-      up == null ? null : weightsFor(up, PoseGuard.lowerHalf);
+  final List<BakePose> orderedPoses = <BakePose>[
+    frontal,
+    leftSource,
+    rightSource,
+    ?up,
+  ];
+  final List<List<double>> weights = <List<double>>[
+    weightsFor(frontal, PoseGuard.frontalCenter),
+    weightsFor(leftSource, PoseGuard.leftHalf),
+    weightsFor(rightSource, PoseGuard.rightHalf),
+    if (up != null) weightsFor(up, PoseGuard.lowerHalf),
+  ];
 
   const TextureBaker baker = TextureBaker();
-  List<double> gainFor(BakePose pose, List<double> w) => colorMatch
-      ? baker.poseGain(
-          reference: frontal,
-          pose: pose,
-          refWeight: wFrontal,
-          poseWeight: w,
-        )
-      : const <double>[1, 1, 1];
+  final List<List<double>> gains = _poseGains(
+    baker: baker,
+    poses: orderedPoses,
+    weights: weights,
+    colorMatch: colorMatch,
+    neutral: colorNeutral,
+  );
 
   final List<WeightedPose> weighted = <WeightedPose>[
-    WeightedPose(pose: frontal, weight: wFrontal),
-    WeightedPose(
-        pose: leftSource, weight: wLeft, gain: gainFor(leftSource, wLeft)),
-    WeightedPose(
-        pose: rightSource, weight: wRight, gain: gainFor(rightSource, wRight)),
-    if (up != null && wUp != null)
-      WeightedPose(pose: up, weight: wUp, gain: gainFor(up, wUp)),
+    for (int i = 0; i < orderedPoses.length; i++)
+      WeightedPose(pose: orderedPoses[i], weight: weights[i], gain: gains[i]),
   ];
 
   return baker.bakeViewDependent(
@@ -253,6 +261,63 @@ img.Image _bakeViewDependent({
     textureSize: size,
     blend: blend,
   );
+}
+
+/// Mirrors `session_baker._poseGains`: per-pose colour-match gains. [poses][0] is
+/// frontal. `neutral` → normalise all poses to their shared average; else match
+/// each other pose to frontal.
+List<List<double>> _poseGains({
+  required TextureBaker baker,
+  required List<BakePose> poses,
+  required List<List<double>> weights,
+  required bool colorMatch,
+  required bool neutral,
+}) {
+  final int n = poses.length;
+  const List<double> identity = <double>[1, 1, 1];
+  if (!colorMatch) {
+    return <List<double>>[for (int i = 0; i < n; i++) identity];
+  }
+  if (neutral) {
+    final List<List<double>?> means = <List<double>?>[
+      for (int i = 0; i < n; i++)
+        baker.poseMeanColor(pose: poses[i], weight: weights[i]),
+    ];
+    final List<double> target = <double>[0, 0, 0];
+    int valid = 0;
+    for (final List<double>? m in means) {
+      if (m == null) {
+        continue;
+      }
+      target[0] += m[0];
+      target[1] += m[1];
+      target[2] += m[2];
+      valid++;
+    }
+    if (valid == 0) {
+      return <List<double>>[for (int i = 0; i < n; i++) identity];
+    }
+    target[0] /= valid;
+    target[1] /= valid;
+    target[2] /= valid;
+    return <List<double>>[
+      for (int i = 0; i < n; i++)
+        means[i] == null
+            ? identity
+            : TextureBaker.gainToTarget(means[i]!, target),
+    ];
+  }
+  final List<double> wFrontal = weights[0];
+  return <List<double>>[
+    identity,
+    for (int i = 1; i < n; i++)
+      baker.poseGain(
+        reference: poses[0],
+        pose: poses[i],
+        refWeight: wFrontal,
+        poseWeight: weights[i],
+      ),
+  ];
 }
 
 BakePose _loadPose(Directory dir, Map<String, dynamic>? pose, [_Ply? preloaded]) {

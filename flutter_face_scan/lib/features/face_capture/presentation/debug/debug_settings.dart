@@ -20,6 +20,7 @@ class DebugSettings extends ChangeNotifier {
     bool? viewDependent,
     bool? viewBestOnly,
     bool? viewColorMatch,
+    bool? viewColorNeutral,
   }) : _showHud = showHud ?? kCaptureDebugHud,
        _showMesh = showMesh ?? kFaceMeshOverlay,
        _fillHoles = fillHoles ?? true,
@@ -27,7 +28,8 @@ class DebugSettings extends ChangeNotifier {
        _chinUpLowerFace = chinUpLowerFace ?? true,
        _viewDependent = viewDependent ?? false,
        _viewBestOnly = viewBestOnly ?? false,
-       _viewColorMatch = viewColorMatch ?? true;
+       _viewColorMatch = viewColorMatch ?? true,
+       _viewColorNeutral = viewColorNeutral ?? false;
 
   bool _showHud;
   bool _showMesh;
@@ -37,6 +39,7 @@ class DebugSettings extends ChangeNotifier {
   bool _viewDependent;
   bool _viewBestOnly;
   bool _viewColorMatch;
+  bool _viewColorNeutral;
 
   bool get showHud => _showHud;
   bool get showMesh => _showMesh;
@@ -70,6 +73,12 @@ class DebugSettings extends ChangeNotifier {
   /// each pose to frontal over their overlap (removes exposure/white-balance
   /// seams). `false` = raw pose colours. Re-bake to apply.
   bool get viewColorMatch => _viewColorMatch;
+
+  /// Only relevant when [viewColorMatch] is on: `false` (default) = match every
+  /// pose to the FRONTAL exposure/white-balance over their overlap. `true` =
+  /// neutral: normalise every pose (incl. frontal) to the shared average colour
+  /// (no privileged pose). Re-bake to apply.
+  bool get viewColorNeutral => _viewColorNeutral;
 
   set showHud(bool value) {
     if (value != _showHud) {
@@ -123,6 +132,13 @@ class DebugSettings extends ChangeNotifier {
   set viewColorMatch(bool value) {
     if (value != _viewColorMatch) {
       _viewColorMatch = value;
+      notifyListeners();
+    }
+  }
+
+  set viewColorNeutral(bool value) {
+    if (value != _viewColorNeutral) {
+      _viewColorNeutral = value;
       notifyListeners();
     }
   }

@@ -29,6 +29,7 @@ Zahnrad-Icon **⚙ (oben rechts)** → Bottom-Sheet mit den Togglern.
 | **View-dependent Blend (n·v)** | Pro Oberflächenpunkt das Foto gewichten, das die Fläche am direktesten (head-on) gesehen hat; ersetzt die statischen Tabellen. Mit Guards: frontal = mittleres Band, Turn-Posen = jeweils ihre Hälfte, Chin-up = untere Hälfte | **„View-dependent blend (n·v)"** | **AUS** | AN = adaptive Quellenauswahl (A/B gegen aktuell). „Re-bake texture" anwenden. Guards verhindern Übersprechen über die Symmetrieachse |
 | **View: best pose only** | Pro Texel nur die **beste** Pose (argmax `n·v`) statt gewichtetem Mittel → maximal scharf, aber sichtbare Nähte am Gewinner-Wechsel | **„View: best pose only (sharper)"** | **AUS** (gewichtet mischen) | Nur bei aktivem view-dependent. AN = keine Vermischung (schärfer). Nähte durch Farbangleich mildern |
 | **View: Farben an frontal angleichen** | Jede Pose per Kanal-Gain auf die frontale Belichtung/Weißabgleich normieren (gemessen im Überlappungsbereich) → keine Belichtungs-/Farbnähte | **„View: match colours to frontal"** | **AN** | Nur bei aktivem view-dependent. Essenziell für best-only. AUS = Rohfarben je Pose |
+| **View: neutrales Farbziel** | Referenz-Modus für den Farbausgleich: alle Posen (inkl. frontal) auf ihren **gemeinsamen Mittelwert** normieren statt auf frontal → keine privilegierte Pose | **„View: neutral colour target"** | **AUS** (= an frontal) | Braucht „match colours" AN. AN = neutral/„default"-artig; AUS = frontal als Referenz. `ml-wb` selbst läuft nicht im Isolate (Python) |
 | **Kalibrierungs-HUD** | Debug-Overlay (Winkel, hi-res cap, Auflösungen) | **„Calibration HUD"** | via `--dart-define CAPTURE_DEBUG_HUD` | Reines Diagnose-Overlay |
 | **Mesh-Overlay** | Grünes Wireframe + rote Symmetrieachs-Punkte | **„Face mesh overlay"** | via `--dart-define FACE_MESH_OVERLAY` | Verifiziert Vertex-Tabellen live |
 
@@ -65,6 +66,7 @@ Diese laufen fest mit; zum Deaktivieren wäre eine Code-Änderung nötig.
 | **`--view-dependent`** | n·v-Blend offline backen (wie der App-Toggle) | CLI `dart run tool/bake_texture.dart <dir> --view-dependent` |
 | **`--best`** | Mit `--view-dependent`: best-only statt gewichtetem Mittel | CLI `dart run tool/bake_texture.dart <dir> --view-dependent --best` |
 | **`--no-color-match`** | Mit `--view-dependent`: Farbangleich der Posen an frontal aus | CLI `dart run tool/bake_texture.dart <dir> --view-dependent --no-color-match` |
+| **`--wb-neutral`** | Mit `--view-dependent`: alle Posen auf gemeinsamen Mittelwert statt frontal | CLI `dart run tool/bake_texture.dart <dir> --view-dependent --wb-neutral` |
 | **`--no-holes` / `--no-normals` / `--size`** | Bake-Varianten offline | CLI `tool/bake_texture.dart` |
 | **ARKit `captureHighResolutionFrame`** | Hi-Res-Still aus der ARKit-Session (nur wenn Video-Format es unterstützt; bei Face-Tracking meist NICHT) | greift automatisch im ARKit-Pfad (Toggle „hi-res" = AUS), sonst Fallback auf Videoframe |
 

@@ -87,6 +87,7 @@ final class SessionTextureBaker {
     bool viewDependent = false,
     bool viewBlend = true,
     bool colorMatch = true,
+    bool colorMatchNeutral = false,
   }) async {
     // textureSize 0 = Original: match the frontal still's larger dimension
     // (clamped), so the atlas isn't the bottleneck.
@@ -102,6 +103,7 @@ final class SessionTextureBaker {
       viewDependent: viewDependent,
       viewBlend: viewBlend,
       colorMatch: colorMatch,
+      colorMatchNeutral: colorMatchNeutral,
     );
     if (request == null) {
       return null;
@@ -135,6 +137,7 @@ final class SessionTextureBaker {
     required bool viewDependent,
     required bool viewBlend,
     required bool colorMatch,
+    required bool colorMatchNeutral,
   }) {
     final Map<FacePose, CaptureSnapshot> byPose = <FacePose, CaptureSnapshot>{
       for (final CaptureSnapshot s in session.snapshots) s.pose: s,
@@ -170,6 +173,7 @@ final class SessionTextureBaker {
       viewDependent: viewDependent,
       viewBlend: viewBlend,
       colorMatch: colorMatch,
+      colorMatchNeutral: colorMatchNeutral,
     );
   }
 
@@ -226,6 +230,7 @@ final class _BakeRequest {
     required this.viewDependent,
     required this.viewBlend,
     required this.colorMatch,
+    required this.colorMatchNeutral,
   });
 
   final _PoseInput frontal;
@@ -241,6 +246,7 @@ final class _BakeRequest {
   final bool viewDependent;
   final bool viewBlend;
   final bool colorMatch;
+  final bool colorMatchNeutral;
 }
 
 final class _BakeResult {
@@ -312,6 +318,7 @@ _BakeResult _runBake(_BakeRequest r) {
           textureSize: r.textureSize,
           blend: r.viewBlend,
           colorMatch: r.colorMatch,
+          colorMatchNeutral: r.colorMatchNeutral,
         )
       : const TextureBaker().bake(
           frontal: frontal,
@@ -405,6 +412,7 @@ img.Image _bakeViewDependent({
   required int textureSize,
   required bool blend,
   required bool colorMatch,
+  required bool colorMatchNeutral,
 }) {
   final FaceGuardFrame frame = computeGuardFrame(
     verts: frontal.vertices,
@@ -430,34 +438,32 @@ img.Image _bakeViewDependent({
         allowed: allowed,
       );
 
-  final List<double> wFrontal = weightsFor(frontal, allowFrontal);
-  final List<double> wLeft = weightsFor(leftSource, allowLeft);
-  final List<double> wRight = weightsFor(rightSource, allowRight);
-  final List<double>? wUp =
-      upSource == null ? null : weightsFor(upSource, allowLower);
+  // Poses in order (frontal first → reference + fallback). Only present ones.
+  final List<BakePose> orderedPoses = <BakePose>[
+    frontal,
+    leftSource,
+    rightSource,
+    ?upSource,
+  ];
+  final List<List<double>> weights = <List<double>>[
+    weightsFor(frontal, allowFrontal),
+    weightsFor(leftSource, allowLeft),
+    weightsFor(rightSource, allowRight),
+    if (upSource != null) weightsFor(upSource, allowLower),
+  ];
 
-  // Colour-match each non-frontal pose to frontal over their overlap, so the
-  // per-pose AE/AWB differences don't seam (essential for best-only).
   const TextureBaker baker = TextureBaker();
-  List<double> gainFor(BakePose pose, List<double> w) => colorMatch
-      ? baker.poseGain(
-          reference: frontal,
-          pose: pose,
-          refWeight: wFrontal,
-          poseWeight: w,
-        )
-      : const <double>[1, 1, 1];
+  final List<List<double>> gains = _poseGains(
+    baker: baker,
+    poses: orderedPoses,
+    weights: weights,
+    colorMatch: colorMatch,
+    neutral: colorMatchNeutral,
+  );
 
-  // Frontal first → it's the reference (identity gain) and the fallback when no
-  // pose covers a texel.
   final List<WeightedPose> poses = <WeightedPose>[
-    WeightedPose(pose: frontal, weight: wFrontal),
-    WeightedPose(
-        pose: leftSource, weight: wLeft, gain: gainFor(leftSource, wLeft)),
-    WeightedPose(
-        pose: rightSource, weight: wRight, gain: gainFor(rightSource, wRight)),
-    if (upSource != null && wUp != null)
-      WeightedPose(pose: upSource, weight: wUp, gain: gainFor(upSource, wUp)),
+    for (int i = 0; i < orderedPoses.length; i++)
+      WeightedPose(pose: orderedPoses[i], weight: weights[i], gain: gains[i]),
   ];
 
   return baker.bakeViewDependent(
@@ -467,6 +473,71 @@ img.Image _bakeViewDependent({
     textureSize: textureSize,
     blend: blend,
   );
+}
+
+/// Per-pose colour-match gains. [poses]/[weights] are index-aligned, [poses][0]
+/// is frontal. Modes:
+///  * `!colorMatch` → all identity (no correction).
+///  * `neutral` → normalise EVERY pose (incl. frontal) to a shared target = the
+///    per-channel average of the poses' mean face colours (no privileged pose;
+///    closest to "all on one default").
+///  * else (frontal reference) → frontal identity; each other pose matched to
+///    frontal over their overlap.
+List<List<double>> _poseGains({
+  required TextureBaker baker,
+  required List<BakePose> poses,
+  required List<List<double>> weights,
+  required bool colorMatch,
+  required bool neutral,
+}) {
+  final int n = poses.length;
+  const List<double> identity = <double>[1, 1, 1];
+  if (!colorMatch) {
+    return <List<double>>[for (int i = 0; i < n; i++) identity];
+  }
+
+  if (neutral) {
+    final List<List<double>?> means = <List<double>?>[
+      for (int i = 0; i < n; i++)
+        baker.poseMeanColor(pose: poses[i], weight: weights[i]),
+    ];
+    final List<double> target = <double>[0, 0, 0];
+    int valid = 0;
+    for (final List<double>? m in means) {
+      if (m == null) {
+        continue;
+      }
+      target[0] += m[0];
+      target[1] += m[1];
+      target[2] += m[2];
+      valid++;
+    }
+    if (valid == 0) {
+      return <List<double>>[for (int i = 0; i < n; i++) identity];
+    }
+    target[0] /= valid;
+    target[1] /= valid;
+    target[2] /= valid;
+    return <List<double>>[
+      for (int i = 0; i < n; i++)
+        means[i] == null
+            ? identity
+            : TextureBaker.gainToTarget(means[i]!, target),
+    ];
+  }
+
+  // Frontal reference: match each other pose to frontal over their overlap.
+  final List<double> wFrontal = weights[0];
+  return <List<double>>[
+    identity, // frontal is the reference
+    for (int i = 1; i < n; i++)
+      baker.poseGain(
+        reference: poses[0],
+        pose: poses[i],
+        refWeight: wFrontal,
+        poseWeight: weights[i],
+      ),
+  ];
 }
 
 BakePose _toBakePose(_PoseInput p) {
