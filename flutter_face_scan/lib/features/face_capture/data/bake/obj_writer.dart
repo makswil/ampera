@@ -42,9 +42,24 @@ String renderObj({
   return b.toString();
 }
 
-/// MTL pointing [materialName] at the baked [pngName] texture.
-String renderMtl({required String materialName, required String pngName}) =>
-    'newmtl $materialName\n'
-    'Ka 1.0 1.0 1.0\n'
-    'Kd 1.0 1.0 1.0\n'
-    'map_Kd $pngName\n';
+/// MTL pointing [materialName] at the baked albedo [pngName], and optionally a
+/// normal map [normalPngName].
+///
+/// Uses `map_Kn` (Blender / tools that expect a normal map). Deliberately does
+/// **not** set `map_Bump`: many viewers treat bump as a height/luma multiply and
+/// wash the whole face out with a pale veil when given an RGB normal atlas.
+String renderMtl({
+  required String materialName,
+  required String pngName,
+  String? normalPngName,
+}) {
+  final StringBuffer b = StringBuffer()
+    ..writeln('newmtl $materialName')
+    ..writeln('Ka 1.0 1.0 1.0')
+    ..writeln('Kd 1.0 1.0 1.0')
+    ..writeln('map_Kd $pngName');
+  if (normalPngName != null) {
+    b.writeln('map_Kn $normalPngName');
+  }
+  return b.toString();
+}

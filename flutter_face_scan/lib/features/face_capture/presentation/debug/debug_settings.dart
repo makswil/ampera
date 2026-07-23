@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-import 'capture_debug_hud.dart';
+import '../../domain/value_objects/pose_tolerance.dart';
 
 /// Whether the in-app tools button (⚙ → HUD/mesh toggles + manage scans) is
 /// shown. Kept as a single switch so it can be turned off for production by
@@ -16,30 +16,47 @@ class DebugSettings extends ChangeNotifier {
     bool? showMesh,
     bool? fillHoles,
     bool? hiResPhoto,
+    bool? lockAeAwb,
     bool? chinUpLowerFace,
     bool? viewDependent,
     bool? viewBestOnly,
-    bool? viewColorMatch,
-    bool? viewColorNeutral,
-  }) : _showHud = showHud ?? kCaptureDebugHud,
-       _showMesh = showMesh ?? kFaceMeshOverlay,
+    bool? dartColorGain,
+    bool? bakeNormalMap,
+    double? targetDistanceMeters,
+    bool? mlWb,
+    bool? mlWbMatchFrontal,
+  }) : _showHud = showHud ?? true,
+       _showMesh = showMesh ?? true,
        _fillHoles = fillHoles ?? true,
-       _hiResPhoto = hiResPhoto ?? false,
+       _hiResPhoto = hiResPhoto ?? true,
+       _lockAeAwb = lockAeAwb ?? true,
        _chinUpLowerFace = chinUpLowerFace ?? true,
-       _viewDependent = viewDependent ?? false,
+       _viewDependent = viewDependent ?? true,
        _viewBestOnly = viewBestOnly ?? false,
-       _viewColorMatch = viewColorMatch ?? true,
-       _viewColorNeutral = viewColorNeutral ?? false;
+       _dartColorGain = dartColorGain ?? false,
+       _bakeNormalMap = bakeNormalMap ?? false,
+       _targetDistanceMeters = (targetDistanceMeters ??
+               PoseTolerance.kDefaultTargetDistanceMeters)
+           .clamp(
+             PoseTolerance.kMinTargetDistanceMeters,
+             PoseTolerance.kMaxTargetDistanceMeters,
+           ),
+       _mlWb = mlWb ?? true,
+       _mlWbMatchFrontal = mlWbMatchFrontal ?? false;
 
   bool _showHud;
   bool _showMesh;
   bool _fillHoles;
   bool _hiResPhoto;
+  bool _lockAeAwb;
   bool _chinUpLowerFace;
   bool _viewDependent;
   bool _viewBestOnly;
-  bool _viewColorMatch;
-  bool _viewColorNeutral;
+  bool _dartColorGain;
+  bool _bakeNormalMap;
+  double _targetDistanceMeters;
+  bool _mlWb;
+  bool _mlWbMatchFrontal;
 
   bool get showHud => _showHud;
   bool get showMesh => _showMesh;
@@ -49,8 +66,13 @@ class DebugSettings extends ChangeNotifier {
   bool get fillHoles => _fillHoles;
 
   /// Texture source: false = ARKit video frame (stable), true = AVCapture hi-res
-  /// still. Default false so the working path is always one tap away.
+  /// still. Default on.
   bool get hiResPhoto => _hiResPhoto;
+
+  /// Only for AVCapture hi-res: after the first pose photo settles AE/AWB, lock
+  /// ISO/shutter/WB gains and reuse for later poses (less exposure flicker).
+  /// Default on. New scan clears the lock.
+  bool get lockAeAwb => _lockAeAwb;
 
   /// Whether the lower/under face (chin, jaw underside) is sourced from the
   /// chin-up pose (on) or left on the frontal source (off). Default on. Turn off
@@ -58,27 +80,34 @@ class DebugSettings extends ChangeNotifier {
   bool get chinUpLowerFace => _chinUpLowerFace;
 
   /// View-dependent (normal-based, `n·v`) texture blend (on) vs. the static
-  /// region tables (off). Default off so it's an explicit A/B against the
-  /// current pipeline. When on, each pose contributes per surface point by how
-  /// head-on it saw it, gated by per-pose spatial guards.
+  /// region tables (off). Default on. When on, each pose contributes per surface
+  /// point by how head-on it saw it, gated by per-pose spatial guards.
   bool get viewDependent => _viewDependent;
 
-  /// Only relevant when [viewDependent] is on: `true` = best-only (take the
-  /// single highest-`n·v` pose per texel → maximally sharp, but seams where the
-  /// winner switches). `false` (default) = weighted blend (smooth seams,
-  /// slightly softer). Re-bake to apply.
+  /// Only relevant when [viewDependent] is on: `true` = best-only (single
+  /// highest-`n·v` pose per texel → sharp; hard seams possible).
+  /// `false` (default) = weighted blend (smoother colour). Re-bake to apply.
   bool get viewBestOnly => _viewBestOnly;
 
-  /// Only relevant when [viewDependent] is on: `true` (default) = colour-match
-  /// each pose to frontal over their overlap (removes exposure/white-balance
-  /// seams). `false` = raw pose colours. Re-bake to apply.
-  bool get viewColorMatch => _viewColorMatch;
+  /// Only when [viewDependent] is on: Dart `poseGain` — match each pose's mean
+  /// RGB to frontal over their overlap. Default off (A/B with ml-wb). Re-bake.
+  bool get dartColorGain => _dartColorGain;
 
-  /// Only relevant when [viewColorMatch] is on: `false` (default) = match every
-  /// pose to the FRONTAL exposure/white-balance over their overlap. `true` =
-  /// neutral: normalise every pose (incl. frontal) to the shared average colour
-  /// (no privileged pose). Re-bake to apply.
-  bool get viewColorNeutral => _viewColorNeutral;
+  /// Bake an object-space normal map (`*_n.png`) from the TrueDepth face mesh
+  /// into the UV atlas. Default off. Re-bake to apply.
+  bool get bakeNormalMap => _bakeNormalMap;
+
+  /// Target camera↔face distance for the face-frame gate (metres). Closer =
+  /// more face pixels in the still → sharper bake. Live: no rebuild needed.
+  double get targetDistanceMeters => _targetDistanceMeters;
+
+  /// On-device ml-wb CoreML white-balance on pose stills before bake. Default
+  /// on. Re-bake to apply.
+  bool get mlWb => _mlWb;
+
+  /// Only when [mlWb] is on: `true` = all poses → frontal still's estimated
+  /// Kelvin; `false` (default) = all poses → neutral 5600 K. Re-bake to apply.
+  bool get mlWbMatchFrontal => _mlWbMatchFrontal;
 
   set showHud(bool value) {
     if (value != _showHud) {
@@ -108,6 +137,13 @@ class DebugSettings extends ChangeNotifier {
     }
   }
 
+  set lockAeAwb(bool value) {
+    if (value != _lockAeAwb) {
+      _lockAeAwb = value;
+      notifyListeners();
+    }
+  }
+
   set chinUpLowerFace(bool value) {
     if (value != _chinUpLowerFace) {
       _chinUpLowerFace = value;
@@ -129,16 +165,41 @@ class DebugSettings extends ChangeNotifier {
     }
   }
 
-  set viewColorMatch(bool value) {
-    if (value != _viewColorMatch) {
-      _viewColorMatch = value;
+  set dartColorGain(bool value) {
+    if (value != _dartColorGain) {
+      _dartColorGain = value;
       notifyListeners();
     }
   }
 
-  set viewColorNeutral(bool value) {
-    if (value != _viewColorNeutral) {
-      _viewColorNeutral = value;
+  set bakeNormalMap(bool value) {
+    if (value != _bakeNormalMap) {
+      _bakeNormalMap = value;
+      notifyListeners();
+    }
+  }
+
+  set targetDistanceMeters(double value) {
+    final double clamped = value.clamp(
+      PoseTolerance.kMinTargetDistanceMeters,
+      PoseTolerance.kMaxTargetDistanceMeters,
+    );
+    if (clamped != _targetDistanceMeters) {
+      _targetDistanceMeters = clamped;
+      notifyListeners();
+    }
+  }
+
+  set mlWb(bool value) {
+    if (value != _mlWb) {
+      _mlWb = value;
+      notifyListeners();
+    }
+  }
+
+  set mlWbMatchFrontal(bool value) {
+    if (value != _mlWbMatchFrontal) {
+      _mlWbMatchFrontal = value;
       notifyListeners();
     }
   }

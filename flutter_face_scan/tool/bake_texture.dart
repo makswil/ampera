@@ -13,6 +13,15 @@
 //   --no-color-match with --view-dependent: skip matching poses to frontal.
 //   --wb-neutral     with --view-dependent: match all poses to their shared
 //                    average colour instead of to frontal.
+//   --ml-wb          run the ml-wb PyTorch white-balance model over every pose
+//                    still BEFORE baking (needs the Python venv, see
+//                    tool/ml_wb_correct.py). Normalises all poses to one white
+//                    point → removes colour/exposure seams. The deterministic
+//                    Dart colour-match (poseGain) still runs on top as before.
+//   --ml-wb-reference=frontal  correct toward the frontal still's white balance
+//                    instead of neutral daylight (default: neutral ~5600 K).
+//   --ml-wb-python=<path>      Python interpreter to use (default: the
+//                    tool/.venv-mlwb venv if present, else `python3`).
 
 import 'dart:convert';
 import 'dart:io';
@@ -38,6 +47,9 @@ void main(List<String> args) {
   bool bestOnly = false;
   bool colorMatch = true;
   bool colorNeutral = false;
+  bool mlWb = false;
+  String? mlWbReference; // 'frontal' or a file path; null = neutral target.
+  String? mlWbPython;
   String? out;
   for (final String arg in args) {
     if (arg == '--flip') {
@@ -54,6 +66,13 @@ void main(List<String> args) {
       colorMatch = false;
     } else if (arg == '--wb-neutral') {
       colorNeutral = true;
+    } else if (arg == '--ml-wb') {
+      mlWb = true;
+    } else if (arg.startsWith('--ml-wb-reference=')) {
+      mlWb = true;
+      mlWbReference = arg.substring('--ml-wb-reference='.length);
+    } else if (arg.startsWith('--ml-wb-python=')) {
+      mlWbPython = arg.substring('--ml-wb-python='.length);
     } else if (arg.startsWith('--size=')) {
       size = int.tryParse(arg.substring('--size='.length)) ?? size;
     } else if (arg.startsWith('--out=')) {
@@ -71,13 +90,15 @@ void main(List<String> args) {
     fillHoles ? 'filled' : 'holes',
     if (flip) 'flip',
     if (viewDependent) bestOnly ? 'ndotv-best' : 'ndotv',
+    if (mlWb) 'mlwb',
     '${size}px',
   ].join('_');
   if (positional.isEmpty) {
     stderr.writeln(
       'Usage: dart run tool/bake_texture.dart <session_dir> '
       '[--size=2048] [--flip] [--no-holes] [--no-normals] '
-      '[--view-dependent] [--best] [--out=model]',
+      '[--view-dependent] [--best] [--ml-wb] [--ml-wb-reference=frontal] '
+      '[--out=model]',
     );
     exit(64);
   }
@@ -103,12 +124,26 @@ void main(List<String> args) {
       (p as Map<String, dynamic>)['pose'] as String: p,
   };
 
+  // Optional: run every pose still through the ml-wb PyTorch white-balance model
+  // BEFORE baking, so all poses share one white point (removes colour seams). The
+  // ml-wb/ folder is imported read-only by tool/ml_wb_correct.py. Returns a map
+  // imageFile → corrected PNG path; empty (originals) if disabled or on failure.
+  final Map<String, String> corrected = mlWb
+      ? _runMlWb(
+          dir: dir,
+          poses: poses,
+          reference: mlWbReference,
+          python: mlWbPython,
+        )
+      : const <String, String>{};
+
   final _Ply frontalPly = _loadPly(dir, poses['frontal']);
-  BakePose frontal = _loadPose(dir, poses['frontal'], frontalPly);
-  BakePose left40 = _loadPose(dir, poses['left40']);
-  BakePose right40 = _loadPose(dir, poses['right40']);
+  BakePose frontal = _loadPose(dir, poses['frontal'], frontalPly, corrected);
+  BakePose left40 = _loadPose(dir, poses['left40'], null, corrected);
+  BakePose right40 = _loadPose(dir, poses['right40'], null, corrected);
   // Chin-up is optional (older sessions lack it); only used view-dependent.
-  BakePose? up = poses['up'] == null ? null : _loadPose(dir, poses['up']);
+  BakePose? up =
+      poses['up'] == null ? null : _loadPose(dir, poses['up'], null, corrected);
 
   List<double> texUvs = uvs;
   List<int> triangles = frontalPly.faces;
@@ -197,6 +232,101 @@ void main(List<String> args) {
         '${frontal.vertices.length} verts / '
         '${triangles.length ~/ 3} faces.')
     ..writeln('Wrote ${dir.path}/$out.obj (+ .mtl, .png) — open in MeshLab.');
+}
+
+/// Runs the ml-wb PyTorch white-balance model (via tool/ml_wb_correct.py) over
+/// every pose still, writing corrected PNGs into `<dir>/.mlwb_cache/`. Returns a
+/// map `imageFile → corrected PNG path` so [_loadPose] can pick them up. On any
+/// failure it warns and returns an empty map, so the bake falls back to the
+/// original stills (and the deterministic Dart colour-match still applies).
+///
+/// The ml-wb/ folder is imported read-only by the wrapper — never modified.
+Map<String, String> _runMlWb({
+  required Directory dir,
+  required Map<String, Map<String, dynamic>> poses,
+  String? reference,
+  String? python,
+}) {
+  final String scriptDir = File.fromUri(Platform.script).parent.path;
+  final String script = '$scriptDir/ml_wb_correct.py';
+  if (!File(script).existsSync()) {
+    stderr.writeln('[ml-wb] wrapper not found at $script — skipping (originals).');
+    return const <String, String>{};
+  }
+
+  // Default to the bundled venv if present, else the system python3.
+  String interpreter = python ?? '$scriptDir/.venv-mlwb/bin/python';
+  if (python == null && !File(interpreter).existsSync()) {
+    interpreter = 'python3';
+  }
+
+  // Pose still → its input path; keep the imageFile so we can key the result.
+  final Map<String, String> imageFileByInput = <String, String>{};
+  final List<String> inputs = <String>[];
+  for (final Map<String, dynamic> pose in poses.values) {
+    final Object? imageFile = pose['imageFile'];
+    if (imageFile is! String) {
+      continue;
+    }
+    final String inputPath = '${dir.path}/$imageFile';
+    if (!File(inputPath).existsSync()) {
+      continue;
+    }
+    imageFileByInput[inputPath] = imageFile;
+    inputs.add(inputPath);
+  }
+  if (inputs.isEmpty) {
+    return const <String, String>{};
+  }
+
+  final String outDir = '${dir.path}/.mlwb_cache';
+  final List<String> refArgs = <String>[];
+  if (reference != null && reference.isNotEmpty) {
+    // 'frontal' → use the frontal still as the white-balance reference.
+    final String refPath = reference == 'frontal'
+        ? '${dir.path}/${poses['frontal']?['imageFile']}'
+        : reference;
+    refArgs.addAll(<String>['--reference', refPath]);
+  }
+
+  stderr.writeln('[ml-wb] correcting ${inputs.length} still(s) via $interpreter …');
+  final ProcessResult result;
+  try {
+    result = Process.runSync(
+      interpreter,
+      <String>[script, '--out-dir', outDir, ...refArgs, ...inputs],
+    );
+  } on ProcessException catch (e) {
+    stderr.writeln('[ml-wb] could not start "$interpreter": ${e.message}\n'
+        '        Create the venv (see tool/ml_wb_correct.py) or pass '
+        '--ml-wb-python=<path>. Falling back to original stills.');
+    return const <String, String>{};
+  }
+
+  if (result.exitCode != 0) {
+    stderr.writeln('[ml-wb] correction failed (exit ${result.exitCode}):\n'
+        '${result.stderr}\nFalling back to original stills.');
+    return const <String, String>{};
+  }
+
+  final Map<String, String> byImageFile = <String, String>{};
+  try {
+    final Object? decoded = jsonDecode((result.stdout as String).trim());
+    if (decoded is Map) {
+      decoded.forEach((Object? inputPath, Object? outputPath) {
+        final String? imageFile = imageFileByInput[inputPath];
+        if (imageFile != null && outputPath is String) {
+          byImageFile[imageFile] = outputPath;
+        }
+      });
+    }
+  } catch (e) {
+    stderr.writeln('[ml-wb] could not parse wrapper output: $e — using originals.');
+    return const <String, String>{};
+  }
+
+  stderr.writeln('[ml-wb] applied to ${byImageFile.length} pose(s).');
+  return byImageFile;
 }
 
 /// View-dependent (`n·v`) bake — mirrors `session_baker._bakeViewDependent`.
@@ -320,7 +450,12 @@ List<List<double>> _poseGains({
   ];
 }
 
-BakePose _loadPose(Directory dir, Map<String, dynamic>? pose, [_Ply? preloaded]) {
+BakePose _loadPose(
+  Directory dir,
+  Map<String, dynamic>? pose, [
+  _Ply? preloaded,
+  Map<String, String> imageOverride = const <String, String>{},
+]) {
   if (pose == null) {
     throw StateError('Missing pose in manifest (need frontal/left40/right40).');
   }
@@ -328,10 +463,14 @@ BakePose _loadPose(Directory dir, Map<String, dynamic>? pose, [_Ply? preloaded])
   final Map<String, dynamic> still = pose['still'] as Map<String, dynamic>? ??
       (throw StateError('Pose ${pose['pose']} has no still projection.'));
 
+  // Prefer the ml-wb-corrected still (PNG) when present; else the original JPEG.
+  final String imageFile = pose['imageFile'] as String;
+  final String imagePath =
+      imageOverride[imageFile] ?? '${dir.path}/$imageFile';
   final img.Image? image =
-      img.decodeJpg(File('${dir.path}/${pose['imageFile']}').readAsBytesSync());
+      img.decodeImage(File(imagePath).readAsBytesSync());
   if (image == null) {
-    throw StateError('Could not decode ${pose['imageFile']}.');
+    throw StateError('Could not decode $imagePath.');
   }
 
   final Matrix4 viewMatrix = Matrix4.fromList(_doubles(still['viewMatrix']));

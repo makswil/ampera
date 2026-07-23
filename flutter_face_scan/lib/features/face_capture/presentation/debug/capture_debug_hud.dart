@@ -64,7 +64,8 @@ class _CaptureDebugHudState extends State<CaptureDebugHud> {
   @override
   Widget build(BuildContext context) {
     return Positioned(
-      top: 12,
+      // Below the top action row (cancel / share / gear) so it doesn't cover them.
+      top: 108,
       right: 12,
       child: SafeArea(
         child: _visible

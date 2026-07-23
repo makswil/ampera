@@ -9,11 +9,23 @@ final class PoseTolerance extends Equatable {
     this.rollToleranceDegrees = 5,
     this.maxScreenStraightness = 0.02,
     this.maxScreenCenterOffset = 0.12,
-    this.targetDistanceMeters = 0.32,
+    this.targetDistanceMeters = kDefaultTargetDistanceMeters,
     this.distanceToleranceMeters = 0.06,
     this.holdDuration = const Duration(milliseconds: 2500),
     this.holdGrace = const Duration(milliseconds: 350),
   });
+
+  /// Default face-frame distance: close enough for denser face pixels, still
+  /// OK for side/chin-up poses without clipping (TrueDepth FOV).
+  static const double kDefaultTargetDistanceMeters = 0.25;
+
+  /// Slider / tune range (metres). Below ~0.20 → tracking + side-pose clip risk.
+  static const double kMinTargetDistanceMeters = 0.20;
+  static const double kMaxTargetDistanceMeters = 0.40;
+
+  /// Historical reference distance the on-screen oval was drawn for; used to
+  /// scale the guide oval when [targetDistanceMeters] changes.
+  static const double kReferenceFaceFrameDistanceMeters = 0.32;
 
   /// Allowed |yaw − target| for the pose to count as on-target.
   final double yawToleranceDegrees;

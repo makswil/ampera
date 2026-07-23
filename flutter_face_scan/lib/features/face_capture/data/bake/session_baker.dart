@@ -13,6 +13,7 @@ import '../../domain/entities/capture_snapshot.dart';
 import '../../domain/entities/face_pose.dart';
 import '../../domain/entities/still_capture.dart';
 import '../../domain/v3/hole_filler.dart';
+import '../../domain/v3/normal_map_baker.dart';
 import '../../domain/v3/texture_projection.dart';
 import '../../domain/v3/vertex_normals.dart';
 import '../../domain/v3/view_weights.dart';
@@ -37,11 +38,19 @@ final class BakedTexture {
     required this.objPath,
     required this.mtlPath,
     required this.texturePath,
+    this.normalPath,
+    this.timingSummary,
   });
 
   final String objPath;
   final String mtlPath;
   final String texturePath;
+
+  /// Optional object-space normal map (`*_n.png`), when [bakeNormalMap] was on.
+  final String? normalPath;
+
+  /// Isolate stage timings, e.g. `albedo 800ms · nmap 200ms · total 1100ms`.
+  final String? timingSummary;
 }
 
 /// In-app bake (isolate) from the in-memory [CaptureSession]; writes OBJ+MTL+PNG
@@ -52,7 +61,11 @@ final class SessionTextureBaker {
 
   /// Basename = options + timestamp, so every bake is a distinct file (no
   /// overwrite). `smooth` is constant (normals always on in-app).
-  static String _baseName({required bool fillHoles, required int textureSize}) {
+  static String _baseName({
+    required bool fillHoles,
+    required int textureSize,
+    required bool bakeNormalMap,
+  }) {
     final DateTime now = DateTime.now();
     String two(int n) => n.toString().padLeft(2, '0');
     final String ts = '${two(now.hour)}${two(now.minute)}${two(now.second)}'
@@ -61,6 +74,7 @@ final class SessionTextureBaker {
       'bake',
       'smooth',
       fillHoles ? 'filled' : 'holes',
+      if (bakeNormalMap) 'nmap',
       '${textureSize}px',
       ts,
     ].join('_');
@@ -88,11 +102,16 @@ final class SessionTextureBaker {
     bool viewBlend = true,
     bool colorMatch = true,
     bool colorMatchNeutral = false,
+    bool bakeNormalMap = false,
   }) async {
     // textureSize 0 = Original: match the frontal still's larger dimension
     // (clamped), so the atlas isn't the bottleneck.
     final int resolved = _resolveTextureSize(textureSize, session);
-    final String base = _baseName(fillHoles: fillHoles, textureSize: resolved);
+    final String base = _baseName(
+      fillHoles: fillHoles,
+      textureSize: resolved,
+      bakeNormalMap: bakeNormalMap,
+    );
     final _BakeRequest? request = _buildRequest(
       session,
       base: base,
@@ -104,6 +123,7 @@ final class SessionTextureBaker {
       viewBlend: viewBlend,
       colorMatch: colorMatch,
       colorMatchNeutral: colorMatchNeutral,
+      bakeNormalMap: bakeNormalMap,
     );
     if (request == null) {
       return null;
@@ -120,10 +140,19 @@ final class SessionTextureBaker {
     await mtl.writeAsString(result.mtl);
     await obj.writeAsString(result.obj);
 
+    String? normalPath;
+    if (result.normalPng != null) {
+      final File nFile = File('${directory.path}/${base}_n.png');
+      await nFile.writeAsBytes(result.normalPng!);
+      normalPath = nFile.path;
+    }
+
     return BakedTexture(
       objPath: obj.path,
       mtlPath: mtl.path,
       texturePath: png.path,
+      normalPath: normalPath,
+      timingSummary: result.timingSummary,
     );
   }
 
@@ -138,6 +167,7 @@ final class SessionTextureBaker {
     required bool viewBlend,
     required bool colorMatch,
     required bool colorMatchNeutral,
+    required bool bakeNormalMap,
   }) {
     final Map<FacePose, CaptureSnapshot> byPose = <FacePose, CaptureSnapshot>{
       for (final CaptureSnapshot s in session.snapshots) s.pose: s,
@@ -174,6 +204,7 @@ final class SessionTextureBaker {
       viewBlend: viewBlend,
       colorMatch: colorMatch,
       colorMatchNeutral: colorMatchNeutral,
+      bakeNormalMap: bakeNormalMap,
     );
   }
 
@@ -231,6 +262,7 @@ final class _BakeRequest {
     required this.viewBlend,
     required this.colorMatch,
     required this.colorMatchNeutral,
+    required this.bakeNormalMap,
   });
 
   final _PoseInput frontal;
@@ -247,13 +279,22 @@ final class _BakeRequest {
   final bool viewBlend;
   final bool colorMatch;
   final bool colorMatchNeutral;
+  final bool bakeNormalMap;
 }
 
 final class _BakeResult {
-  const _BakeResult({required this.png, required this.obj, required this.mtl});
+  const _BakeResult({
+    required this.png,
+    required this.obj,
+    required this.mtl,
+    this.normalPng,
+    this.timingSummary,
+  });
   final Uint8List png;
+  final Uint8List? normalPng;
   final String obj;
   final String mtl;
+  final String? timingSummary;
 }
 
 /// Top-level so it runs in a `compute` isolate. Decodes the JPEGs, bakes the
@@ -332,8 +373,34 @@ _BakeResult _runBake(_BakeRequest r) {
         );
 
   final String materialName = r.base;
+  final Stopwatch albedoSw = Stopwatch()..start();
+  final Uint8List albedoPng = img.encodePng(texture);
+  final int albedoMs = albedoSw.elapsedMilliseconds;
+
+  Uint8List? normalPng;
+  int? normalMs;
+  if (r.bakeNormalMap) {
+    final Stopwatch nSw = Stopwatch()..start();
+    final img.Image nmap = bakeNormalMap(
+      vertices: frontal.vertices,
+      normals: normals,
+      uvs: uvs,
+      triangles: triangles,
+      size: r.textureSize,
+    );
+    normalPng = img.encodePng(nmap);
+    normalMs = nSw.elapsedMilliseconds;
+  }
+
+  final String? normalName =
+      normalPng == null ? null : '${materialName}_n.png';
+  final String timing = normalMs == null
+      ? 'albedo ${albedoMs}ms'
+      : 'albedo ${albedoMs}ms · nmap ${normalMs}ms';
+
   return _BakeResult(
-    png: img.encodePng(texture),
+    png: albedoPng,
+    normalPng: normalPng,
     obj: renderObj(
       vertices: frontal.vertices,
       uvs: uvs,
@@ -342,7 +409,12 @@ _BakeResult _runBake(_BakeRequest r) {
       materialName: materialName,
       mtlName: '$materialName.mtl',
     ),
-    mtl: renderMtl(materialName: materialName, pngName: '$materialName.png'),
+    mtl: renderMtl(
+      materialName: materialName,
+      pngName: '$materialName.png',
+      normalPngName: normalName,
+    ),
+    timingSummary: timing,
   );
 }
 

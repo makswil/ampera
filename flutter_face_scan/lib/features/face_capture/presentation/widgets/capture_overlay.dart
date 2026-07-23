@@ -4,6 +4,7 @@ import '../../application/capture_state.dart';
 import '../../application/capture_status.dart';
 import '../../domain/entities/face_pose.dart';
 import '../../domain/entities/pose_guidance.dart';
+import '../../domain/value_objects/pose_tolerance.dart';
 import '../pose_guidance_copy.dart';
 
 /// Pure presentation: renders guidance for the current [CaptureState].
@@ -14,7 +15,11 @@ class CaptureOverlay extends StatelessWidget {
   const CaptureOverlay({
     required this.state,
     this.onStart,
+    this.onBake,
     this.statusLine,
+    this.targetDistanceMeters = PoseTolerance.kDefaultTargetDistanceMeters,
+    this.baking = false,
+    this.canBake = false,
     super.key,
   });
 
@@ -23,9 +28,18 @@ class CaptureOverlay extends StatelessWidget {
   /// Starts (or restarts) the scan. When null, no Start button is shown.
   final VoidCallback? onStart;
 
+  /// Bakes the last saved session with current settings. Shown when [canBake].
+  final VoidCallback? onBake;
+
   /// Optional post-capture status (e.g. "Baking texture…") shown under the
   /// guidance message. Null = nothing extra.
   final String? statusLine;
+
+  /// Face-frame target distance — scales the guide oval to match expected face size.
+  final double targetDistanceMeters;
+
+  final bool baking;
+  final bool canBake;
 
   @override
   Widget build(BuildContext context) {
@@ -34,8 +48,12 @@ class CaptureOverlay extends StatelessWidget {
       children: <Widget>[
         // "Face frame" oval — a placement guide so the face stays a consistent
         // size/position; the distance gate does the actual enforcement.
-        const IgnorePointer(
-          child: CustomPaint(painter: _FaceFramePainter()),
+        IgnorePointer(
+          child: CustomPaint(
+            painter: _FaceFramePainter(
+              targetDistanceMeters: targetDistanceMeters,
+            ),
+          ),
         ),
         SafeArea(
           child: Padding(
@@ -48,7 +66,10 @@ class CaptureOverlay extends StatelessWidget {
                 _GuidanceCard(
                   state: state,
                   onStart: onStart,
+                  onBake: onBake,
                   statusLine: statusLine,
+                  baking: baking,
+                  canBake: canBake,
                 ),
               ],
             ),
@@ -59,16 +80,29 @@ class CaptureOverlay extends StatelessWidget {
   }
 }
 
-/// Draws a centred vertical oval as a face placement guide.
+/// Draws a centred vertical oval as a face placement guide. Scales with the
+/// target camera distance so the ring matches the expected face size.
 class _FaceFramePainter extends CustomPainter {
-  const _FaceFramePainter();
+  const _FaceFramePainter({
+    this.targetDistanceMeters = PoseTolerance.kDefaultTargetDistanceMeters,
+  });
+
+  final double targetDistanceMeters;
 
   @override
   void paint(Canvas canvas, Size size) {
+    // At the historical reference distance the oval is 66% × 62% of the view.
+    // Closer → larger on-screen face → larger guide (inverse distance).
+    final double scale = (PoseTolerance.kReferenceFaceFrameDistanceMeters /
+            targetDistanceMeters.clamp(
+              PoseTolerance.kMinTargetDistanceMeters,
+              PoseTolerance.kMaxTargetDistanceMeters,
+            ))
+        .clamp(0.85, 1.35);
     final Rect oval = Rect.fromCenter(
       center: Offset(size.width / 2, size.height * 0.46),
-      width: size.width * 0.66,
-      height: size.height * 0.62,
+      width: size.width * 0.66 * scale,
+      height: size.height * 0.62 * scale,
     );
     final Paint stroke = Paint()
       ..style = PaintingStyle.stroke
@@ -78,7 +112,8 @@ class _FaceFramePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_FaceFramePainter oldDelegate) => false;
+  bool shouldRepaint(_FaceFramePainter oldDelegate) =>
+      oldDelegate.targetDistanceMeters != targetDistanceMeters;
 }
 
 class _PoseProgressBar extends StatelessWidget {
@@ -135,17 +170,28 @@ class _PoseChip extends StatelessWidget {
 }
 
 class _GuidanceCard extends StatelessWidget {
-  const _GuidanceCard({required this.state, this.onStart, this.statusLine});
+  const _GuidanceCard({
+    required this.state,
+    this.onStart,
+    this.onBake,
+    this.statusLine,
+    this.baking = false,
+    this.canBake = false,
+  });
 
   final CaptureState state;
   final VoidCallback? onStart;
+  final VoidCallback? onBake;
   final String? statusLine;
+  final bool baking;
+  final bool canBake;
 
   @override
   Widget build(BuildContext context) {
     final String message = _message();
     final bool capturing = state.status == CaptureStatus.capturing;
     final bool showStart = !capturing && onStart != null;
+    final bool showBake = canBake && onBake != null;
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -172,12 +218,37 @@ class _GuidanceCard extends StatelessWidget {
               style: const TextStyle(color: Colors.greenAccent, fontSize: 13),
             ),
           ],
-          if (showStart) ...<Widget>[
+          if (showStart || showBake) ...<Widget>[
             const SizedBox(height: 16),
-            FilledButton.icon(
-              onPressed: onStart,
-              icon: const Icon(Icons.play_arrow),
-              label: const Text('Start'),
+            Row(
+              children: <Widget>[
+                if (showStart)
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: onStart,
+                      icon: const Icon(Icons.play_arrow),
+                      label: const Text('Start'),
+                    ),
+                  ),
+                if (showStart && showBake) const SizedBox(width: 8),
+                if (showBake)
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: baking ? null : onBake,
+                      icon: baking
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.brush),
+                      label: Text(baking ? 'Baking…' : 'Bake'),
+                    ),
+                  ),
+              ],
             ),
           ],
         ],

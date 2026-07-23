@@ -122,13 +122,34 @@ CapGeometry buildCapGeometry(
   return CapGeometry(triangles: triangles, uvs: capUvs);
 }
 
-/// Per-pose cap vertex positions: each loop centroid pushed into the socket by
-/// [depthFactor] × loop radius (0 = flat). Flip the sign in [_capVertex] if caps
-/// bulge outward.
+/// Projects each rim vertex of [loops] onto that loop's Newell plane (in place).
+///
+/// ARKit's eye sockets recess the eyelid ring into the skull; flattening the
+/// ring (and then capping flat) removes the "eyes pushed into the face" look.
+void flattenHoleRims(List<List<int>> loops, List<Vector3> vertices) {
+  for (final List<int> loop in loops) {
+    final ({Vector3 centroid, Vector3 normal})? plane =
+        _loopPlane(loop, vertices);
+    if (plane == null) {
+      continue;
+    }
+    final Vector3 n = plane.normal;
+    final Vector3 c = plane.centroid;
+    for (final int vi in loop) {
+      final Vector3 v = vertices[vi];
+      // Orthogonal projection onto the plane through the centroid.
+      v.sub(n * n.dot(v - c));
+    }
+  }
+}
+
+/// Per-pose cap vertex positions: each loop centroid on the (optionally
+/// flattened) rim plane. [depthFactor] × loop radius insets into the socket
+/// (0 = flat, the default — recessed caps look like sunken eyes).
 List<Vector3> capVertices(
   List<List<int>> loops,
   List<Vector3> vertices, {
-  double depthFactor = 0.3,
+  double depthFactor = 0,
 }) {
   return <Vector3>[
     for (final List<int> loop in loops) _capVertex(loop, vertices, depthFactor),
@@ -136,23 +157,42 @@ List<Vector3> capVertices(
 }
 
 Vector3 _capVertex(List<int> loop, List<Vector3> vertices, double depthFactor) {
-  final Vector3 centroid = Vector3.zero();
-  for (final int vi in loop) {
-    centroid.add(vertices[vi]);
+  final ({Vector3 centroid, Vector3 normal})? plane =
+      _loopPlane(loop, vertices);
+  if (plane == null) {
+    final Vector3 fallback = Vector3.zero();
+    for (final int vi in loop) {
+      fallback.add(vertices[vi]);
+    }
+    fallback.scale(1.0 / loop.length);
+    return fallback;
   }
-  centroid.scale(1.0 / loop.length);
   if (depthFactor == 0) {
-    return centroid;
+    return Vector3.copy(plane.centroid);
   }
 
   // Mean rim radius.
   double radius = 0;
   for (final int vi in loop) {
-    radius += (vertices[vi] - centroid).length;
+    radius += (vertices[vi] - plane.centroid).length;
   }
   radius /= loop.length;
 
-  // Loop plane normal (Newell's method).
+  // + = into the socket (loop winding makes Newell normal point inward).
+  return plane.centroid + plane.normal * (depthFactor * radius);
+}
+
+/// Newell plane for [loop]: centroid + unit normal. Null if degenerate.
+({Vector3 centroid, Vector3 normal})? _loopPlane(
+  List<int> loop,
+  List<Vector3> vertices,
+) {
+  final Vector3 centroid = Vector3.zero();
+  for (final int vi in loop) {
+    centroid.add(vertices[vi]);
+  }
+  centroid.scale(1.0 / loop.length);
+
   final Vector3 normal = Vector3.zero();
   for (int i = 0; i < loop.length; i++) {
     final Vector3 cur = vertices[loop[i]];
@@ -163,9 +203,8 @@ Vector3 _capVertex(List<int> loop, List<Vector3> vertices, double depthFactor) {
       ..z += (cur.x - nxt.x) * (cur.y + nxt.y);
   }
   if (normal.length2 == 0) {
-    return centroid;
+    return null;
   }
   normal.normalize();
-  // + = into the socket (loop winding makes Newell normal point inward).
-  return centroid + normal * (depthFactor * radius);
+  return (centroid: centroid, normal: normal);
 }

@@ -10,8 +10,8 @@ import 'package:flutter_test/flutter_test.dart';
 import '../support/face_observation_fixtures.dart';
 
 void main() {
-  const GuidedPoseValidator validator = GuidedPoseValidator(
-    axisExtractor: LeastSquaresSymmetryAxisExtractor(),
+  final GuidedPoseValidator validator = GuidedPoseValidator(
+    axisExtractor: const LeastSquaresSymmetryAxisExtractor(),
   );
 
   PoseValidation validate(FacePose pose, EulerAngles angles) {
@@ -83,7 +83,7 @@ void main() {
         pose: FacePose.frontal,
         observation: observationOnLine(
           eulerAngles: const EulerAngles.zero(),
-          distanceMeters: 0.5, // target 0.32 ± 0.06
+          distanceMeters: 0.5, // target 0.25 ± 0.06
         ),
       );
 
@@ -95,7 +95,7 @@ void main() {
         pose: FacePose.frontal,
         observation: observationOnLine(
           eulerAngles: const EulerAngles.zero(),
-          distanceMeters: 0.2,
+          distanceMeters: 0.15, // below 0.25 − 0.06
         ),
       );
 
@@ -107,7 +107,7 @@ void main() {
         pose: FacePose.frontal,
         observation: observationOnLine(
           eulerAngles: const EulerAngles.zero(),
-          distanceMeters: 0.32,
+          distanceMeters: 0.25,
         ),
       );
 

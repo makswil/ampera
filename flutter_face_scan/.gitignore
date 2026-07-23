@@ -61,5 +61,10 @@ ios/Runner/GeneratedPluginRegistrant.*
 # Generated at build/run (not source)
 **/GeneratedPluginRegistrant.*
 
+# ml-wb white-balance bridge (tool/ml_wb_correct.py): local Python venv +
+# per-session corrected-still cache. Not source.
+tool/.venv-mlwb/
+**/.mlwb_cache/
+
 # Uncomment to exclude tests from this repo:
 #/test/

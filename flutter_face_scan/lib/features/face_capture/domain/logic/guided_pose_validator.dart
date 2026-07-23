@@ -23,16 +23,20 @@ import 'screen_axis_aligner.dart';
 /// Pure and deterministic — depends only on injected collaborators, so it is
 /// trivially unit-tested with hand-built observations.
 final class GuidedPoseValidator implements PoseValidator {
-  const GuidedPoseValidator({
+  GuidedPoseValidator({
     required SymmetryAxisExtractor axisExtractor,
     PoseTolerance tolerance = const PoseTolerance(),
     ScreenAxisAligner screenAligner = const ScreenAxisAligner(),
   }) : _axisExtractor = axisExtractor,
-       _tolerance = tolerance,
+       tolerance = tolerance,
        _screenAligner = screenAligner;
 
   final SymmetryAxisExtractor _axisExtractor;
-  final PoseTolerance _tolerance;
+
+  /// Mutable so the debug distance slider can retarget the face-frame live
+  /// without rebuilding the capture bloc.
+  PoseTolerance tolerance;
+
   final ScreenAxisAligner _screenAligner;
 
   @override
@@ -75,21 +79,21 @@ final class GuidedPoseValidator implements PoseValidator {
     // when a distance is available (device); 0 means unknown (unit tests).
     final double distance = observation.distanceMeters;
     if (distance > 0) {
-      final double distanceError = distance - _tolerance.targetDistanceMeters;
-      if (distanceError > _tolerance.distanceToleranceMeters) {
+      final double distanceError = distance - tolerance.targetDistanceMeters;
+      if (distanceError > tolerance.distanceToleranceMeters) {
         guidance.add(PoseGuidance.moveCloser); // too far away
-      } else if (distanceError < -_tolerance.distanceToleranceMeters) {
+      } else if (distanceError < -tolerance.distanceToleranceMeters) {
         guidance.add(PoseGuidance.moveFarther); // too close
       }
     }
 
-    if (yawError.abs() > _tolerance.yawToleranceDegrees) {
+    if (yawError.abs() > tolerance.yawToleranceDegrees) {
       // yaw is + to the user's left; positive error => turned too far left.
       guidance.add(
         yawError > 0 ? PoseGuidance.turnRight : PoseGuidance.turnLeft,
       );
     }
-    if (pitchError.abs() > _tolerance.pitchToleranceDegrees) {
+    if (pitchError.abs() > tolerance.pitchToleranceDegrees) {
       guidance.add(pitchError > 0 ? PoseGuidance.lookDown : PoseGuidance.lookUp);
     }
     // Roll ("level head") is only meaningful for the frontal pose: the 2D
@@ -97,7 +101,7 @@ final class GuidedPoseValidator implements PoseValidator {
     // the projected midline legitimately leans from perspective + face
     // curvature, so checking it there would block a perfectly level pose.
     if (pose == FacePose.frontal &&
-        rollError.abs() > _tolerance.rollToleranceDegrees) {
+        rollError.abs() > tolerance.rollToleranceDegrees) {
       guidance.add(PoseGuidance.levelHead);
     }
 
@@ -111,8 +115,8 @@ final class GuidedPoseValidator implements PoseValidator {
     // above, so this checks straightness + centering only. Skipped when the
     // backend supplies no projected points (e.g. unit tests).
     if (screen != null && pose == FacePose.frontal) {
-      final bool straight = screenStraightness <= _tolerance.maxScreenStraightness;
-      final bool centered = screenCenterOffset <= _tolerance.maxScreenCenterOffset;
+      final bool straight = screenStraightness <= tolerance.maxScreenStraightness;
+      final bool centered = screenCenterOffset <= tolerance.maxScreenCenterOffset;
       if (!straight || !centered) {
         guidance.add(PoseGuidance.centerFace);
       }

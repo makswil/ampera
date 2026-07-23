@@ -9,38 +9,42 @@ Stand: Branch `feat/hires-photo`.
 
 ## Einstellungen öffnen
 
-Zahnrad-Icon **⚙ (oben rechts)** → Bottom-Sheet mit den Togglern.
+Zwei Sheets (nur wenn `kShowDevMenu == true`):
 
-- Nur sichtbar, wenn `kShowDevMenu == true`
-  (`lib/features/face_capture/presentation/debug/debug_settings.dart:8`).
-- Für einen Produktions-Build auf `false` setzen → Menü verschwindet.
-- Toggles sind **Laufzeit** (kein Rebuild nötig), aber **nicht persistent**
-  (nach App-Neustart zurück auf Default).
+| Ort | Inhalt |
+|---|---|
+| **⚙ oben rechts** | **Scan:** Face distance, HUD, Mesh, Hi-Res-Foto, Manage scans |
+| **🎚 neben Bake** | **Bake:** ml-wb, Löcher, Chin-up, View-dependent, Best-only |
+
+- Für Produktion: `kShowDevMenu = false` in `debug_settings.dart`.
+- Toggles sind **Laufzeit** (kein Rebuild), **nicht persistent**.
 
 ---
 
 ## 1. Implementiert — per Toggle umschaltbar
 
-| Option | Was es tut | Toggle im ⚙-Sheet | Default | Wirkung |
+| Option | Was es tut | Sheet | Default | Wirkung |
 |---|---|---|---|---|
-| **Texturquelle** | ARKit-Video (stabil) ↔ AVCapture Hi-Res-Foto | **„Texture: AVCapture hi-res"** | **AUS** (ARKit-Video) | AN = 7 MP-Foto pro Pose (schärfer), ARKit wird pro Aufnahme kurz pausiert. AUS = ARKit-Videoframe (~1.5 MP, immer stabil) |
-| **Löcher füllen** | Augen-/Mundlöcher kappen + texturieren | **„Fill eye/mouth holes"** | **AN** | AUS = ARKit-Löcher bleiben im Modell |
-| **Chin-up für untere Fläche** | Kinn/Unterkiefer aus der Chin-up-Pose statt frontal | **„Chin-up for lower face"** | **AN** | AUS = nur frontal (ausschalten, falls die Nase geistert). Wirkt nach „Re-bake texture" auch auf die letzte Session. Nur im **statischen** (regionsbasierten) Pfad relevant |
-| **View-dependent Blend (n·v)** | Pro Oberflächenpunkt das Foto gewichten, das die Fläche am direktesten (head-on) gesehen hat; ersetzt die statischen Tabellen. Mit Guards: frontal = mittleres Band, Turn-Posen = jeweils ihre Hälfte, Chin-up = untere Hälfte | **„View-dependent blend (n·v)"** | **AUS** | AN = adaptive Quellenauswahl (A/B gegen aktuell). „Re-bake texture" anwenden. Guards verhindern Übersprechen über die Symmetrieachse |
-| **View: best pose only** | Pro Texel nur die **beste** Pose (argmax `n·v`) statt gewichtetem Mittel → maximal scharf, aber sichtbare Nähte am Gewinner-Wechsel | **„View: best pose only (sharper)"** | **AUS** (gewichtet mischen) | Nur bei aktivem view-dependent. AN = keine Vermischung (schärfer). Nähte durch Farbangleich mildern |
-| **View: Farben an frontal angleichen** | Jede Pose per Kanal-Gain auf die frontale Belichtung/Weißabgleich normieren (gemessen im Überlappungsbereich) → keine Belichtungs-/Farbnähte | **„View: match colours to frontal"** | **AN** | Nur bei aktivem view-dependent. Essenziell für best-only. AUS = Rohfarben je Pose |
-| **View: neutrales Farbziel** | Referenz-Modus für den Farbausgleich: alle Posen (inkl. frontal) auf ihren **gemeinsamen Mittelwert** normieren statt auf frontal → keine privilegierte Pose | **„View: neutral colour target"** | **AUS** (= an frontal) | Braucht „match colours" AN. AN = neutral/„default"-artig; AUS = frontal als Referenz. `ml-wb` selbst läuft nicht im Isolate (Python) |
-| **Kalibrierungs-HUD** | Debug-Overlay (Winkel, hi-res cap, Auflösungen) | **„Calibration HUD"** | via `--dart-define CAPTURE_DEBUG_HUD` | Reines Diagnose-Overlay |
-| **Mesh-Overlay** | Grünes Wireframe + rote Symmetrieachs-Punkte | **„Face mesh overlay"** | via `--dart-define FACE_MESH_OVERLAY` | Verifiziert Vertex-Tabellen live |
+| **Texturquelle** | ARKit-Video ↔ AVCapture Hi-Res | Scan ⚙ | **AUS** | AN = ~7 MP/Pose |
+| **Face distance** | Ziel-Abstand Face-Frame | Scan ⚙ Slider | **25 cm** | Live; Oval skaliert |
+| **Kalibrierungs-HUD** | Debug-Overlay | Scan ⚙ | via dart-define | Diagnose |
+| **Mesh-Overlay** | Wireframe + Achse | Scan ⚙ | via dart-define | Vertex-Check |
+| **Löcher füllen** | Augen-/Mund kappen | Bake 🎚 | **AN** | AUS = Löcher bleiben |
+| **Chin-up für untere Fläche** | Kinn aus Chin-up-Pose | Bake 🎚 | **AN** | Nur statischer Pfad |
+| **View-dependent Blend (n·v)** | Head-on Pose pro Punkt | Bake 🎚 | **AUS** | Re-bake |
+| **View: best pose only** | Argmax statt Blend | Bake 🎚 | **AUS** | Nur mit view-dependent |
+| **ml-wb white balance** | CoreML-WB vor Bake | Bake 🎚 | **AUS** | Re-bake; **schaltet Dart-Farbgain aus** (sonst würde Gain den Kelvin-Unterschied wieder löschen) |
+| **ml-wb: match frontal** | Ziel = frontal-K vs 5600 K | Bake 🎚 | **AUS** (=5600 K) | Nur wenn ml-wb AN |
 
-### Aktionen im selben Sheet (keine Varianten)
-- **„Re-bake texture"** — backt die letzte gespeicherte Session mit den aktuellen
-  Einstellungen neu (z.B. nach Umschalten von „Fill holes"), ohne neu zu scannen.
-- **„Manage saved scans"** — gespeicherte Sessions ansehen/löschen.
+> Entfernt (redundant zu ml-wb): „match colours to frontal“ / „neutral colour target“.
+> Ohne ml-wb bleibt beim View-dependent-Bake automatisch der Dart-Gain an frontal.
 
-> **Empfohlene Variante für schärfste Textur:** „Texture: AVCapture hi-res" = **AN**,
-> „Fill eye/mouth holes" = **AN**.
+### Aktionen
+- **Start | Bake** nebeneinander in der Guidance-Card; Bake-Settings via 🎚.
+- **Share** oben rechts nach erfolgreichem Bake.
+- **Manage saved scans** im Scan-Sheet.
 
+> **Empfohlen scharf:** Hi-Res = **AN**, Fill holes = **AN**, optional ml-wb.
 ---
 
 ## 2. Implementiert — immer aktiv (kein Toggle)
@@ -67,13 +71,43 @@ Diese laufen fest mit; zum Deaktivieren wäre eine Code-Änderung nötig.
 | **`--best`** | Mit `--view-dependent`: best-only statt gewichtetem Mittel | CLI `dart run tool/bake_texture.dart <dir> --view-dependent --best` |
 | **`--no-color-match`** | Mit `--view-dependent`: Farbangleich der Posen an frontal aus | CLI `dart run tool/bake_texture.dart <dir> --view-dependent --no-color-match` |
 | **`--wb-neutral`** | Mit `--view-dependent`: alle Posen auf gemeinsamen Mittelwert statt frontal | CLI `dart run tool/bake_texture.dart <dir> --view-dependent --wb-neutral` |
+| **`--ml-wb`** | **ML-Weißabgleich:** schickt jede Pose vor dem Bake durch das `ml-wb`-PyTorch-Modell (`ml-wb/`, unangetastet) → alle Posen auf **einen** Weißpunkt (neutrales Tageslicht ~5600 K) normiert; entfernt Farb-/Belichtungsnähte robuster als der deterministische Dart-Gain (der zusätzlich obendrauf läuft). Braucht das lokale Python-venv (siehe unten). | CLI `dart run tool/bake_texture.dart <dir> --ml-wb` (kombinierbar mit `--view-dependent`) |
+| **`--ml-wb-reference=frontal`** | Wie `--ml-wb`, aber Ziel-Weißpunkt = Weißabgleich der **frontalen** Aufnahme statt neutral | CLI `… --ml-wb-reference=frontal` |
+| **`--ml-wb-python=<pfad>`** | Python-Interpreter für ml-wb überschreiben (Default: `tool/.venv-mlwb/bin/python`, sonst `python3`) | CLI `… --ml-wb --ml-wb-python=/pfad/zu/python` |
 | **`--no-holes` / `--no-normals` / `--size`** | Bake-Varianten offline | CLI `tool/bake_texture.dart` |
 | **ARKit `captureHighResolutionFrame`** | Hi-Res-Still aus der ARKit-Session (nur wenn Video-Format es unterstützt; bei Face-Tracking meist NICHT) | greift automatisch im ARKit-Pfad (Toggle „hi-res" = AUS), sonst Fallback auf Videoframe |
+
+### ml-wb Setup (einmalig, nur für `--ml-wb` CLI **oder** App-CoreML-Export)
+Der `ml-wb`-Ordner bleibt unangetastet; Brücken importieren ihn nur read-only.
+
+**CLI (Mac):** Lokales Python-venv (Python 3.12, torch + scipy):
+
+```bash
+cd flutter_face_scan
+python3.12 -m venv tool/.venv-mlwb
+tool/.venv-mlwb/bin/python -m pip install \
+  --index-url https://download.pytorch.org/whl/cpu torch
+tool/.venv-mlwb/bin/python -m pip install pillow pyyaml numpy colour-science scipy
+```
+
+Danach `dart run tool/bake_texture.dart <dir> --ml-wb`.
+
+**iOS-App (CoreML):** Modell einmal exportieren und ins Bundle legen (bereits unter
+`ios/Runner/Models/MLWhiteBalance.mlpackage` wenn Export gelaufen ist):
+
+```bash
+tool/.venv-mlwb/bin/python -m pip install 'coremltools>=7'
+tool/.venv-mlwb/bin/python tool/export_ml_wb_coreml.py
+```
+
+In der App: ⚙ → **ml-wb white balance** (+ optional **match frontal**), dann
+„Re-bake texture". Schlägt CoreML fehl → Original-Stills + Dart-Gain.
 
 ### Tunables (wahrscheinlich am Gerät zu justieren)
 | Parameter | Default | Ort | Bedeutung |
 |---|---|---|---|
 | `FacePose.up.targetPitch` | `22` | `face_pose.dart:17` | Kinn-hoch-Winkel der 4. Pose (steiler = weniger Nasen-Verdeckung, aber schwerer zu halten) |
+| `targetDistanceMeters` | **`0.25`** (⚙-Slider 20–40 cm) | `pose_tolerance.dart` / Debug-Sheet | Face-Frame-Distanz; näher = mehr Gesichtspixel |
 | `_downStartFraction` | `0.25` | `session_baker.dart` | Dead-Zone unter der Achse (größer = Nase sicherer frei, weniger Unter-Nasen-Abdeckung) — nur statischer Pfad |
 | `_downFullFraction` | `0.60` | `session_baker.dart` | Ab hier volle Chin-up-Gewichtung Richtung Kinn — nur statischer Pfad |
 | `kDefaultFacingExponent` | `3` | `view_weights.dart` | n·v-Schärfe `k` (höher = head-on-Pose dominiert stärker; 2–4) |
@@ -90,7 +124,7 @@ Diese laufen fest mit; zum Deaktivieren wäre eine Code-Änderung nötig.
 |---|---|---|---|
 | **Normalen-basiertes Blending** (view-dependent) | Pro Vertex jedes Foto nach `n·v` gewichten (wie head-on die Kamera die Fläche sah); ersetzt die statischen `sideWeight`/`downWeight`-Tabellen und wählt automatisch die beste Aufnahme (Chin-up gewinnt unter der Nase von selbst) | **IMPLEMENTIERT** (Toggle „View-dependent blend (n·v)", Abschnitt 1) — Schritt A+B | — |
 | ↳ Symmetrieachs-Guard | `n·v`-Gewicht einer Seiten-Pose jenseits der Mittelachse hart auf 0 → kein Übersprechen | **IMPLEMENTIERT** (`PoseGuard` in `view_weights.dart`: frontal=mittleres Band, Turn=Hälfte, Chin-up=untere Hälfte, + Mindest-Winkel) | — |
-| ↳ Farb-/Belichtungs-Angleich zwischen Fotos | Jedes AVCapture-Foto hat eigene AE/AWB → Nähte beim Blenden; auf frontal normieren | **IMPLEMENTIERT** (Schritt C, `TextureBaker.poseGain`: per-Kanal-Gain über Überlappung; Toggle „View: match colours to frontal"). `ml-wb` = separates Python-Modell, nicht im Isolate → bewusst deterministischer Gain-Ansatz | — |
+| ↳ Farb-/Belichtungs-Angleich zwischen Fotos | Jedes AVCapture-Foto hat eigene AE/AWB → Nähte beim Blenden; auf frontal normieren | **IMPLEMENTIERT** (Schritt C, `TextureBaker.poseGain` + optional **ml-wb CoreML** vor dem Bake, Toggle „ml-wb white balance") | — |
 | ↳ Sichtbarkeits-/Tiefentest | Occlusion (Nase verdeckt Wange im Seitenfoto) sauber verwerfen | offen, nur falls Artefakte auftreten | mittel–hoch |
 | **Per-Triangle Best-View** | Statt Blend pro Dreieck eine beste Pose wählen + an Grenzen federn (weniger Farbnähte, billig) | offen, guter Zwischenschritt | klein–mittel |
 | **Volles MVS-Texturing** | Graph-Cut-Seams + Gradient-Domain-/Poisson-Blending (beste Qualität) | offen, aktuell overkill | hoch |
@@ -101,7 +135,7 @@ Diese laufen fest mit; zum Deaktivieren wäre eine Code-Änderung nötig.
 ## Kurz-Referenz: Dateien
 
 - Settings-Model: `lib/features/face_capture/presentation/debug/debug_settings.dart`
-- Settings-UI: `lib/features/face_capture/presentation/capture_page.dart` (`_openDebugSheet`)
+- Settings-UI: `lib/features/face_capture/presentation/capture_page.dart` (`_openScanSettings`, `_openBakeSettings`)
 - Posen: `lib/features/face_capture/domain/entities/face_pose.dart`
 - Validierung: `lib/features/face_capture/domain/logic/guided_pose_validator.dart`
 - Achsen: `lib/features/face_capture/domain/constants/face_vertex_indices.dart`

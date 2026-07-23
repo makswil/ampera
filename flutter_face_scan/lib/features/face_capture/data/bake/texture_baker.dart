@@ -32,17 +32,26 @@ final class BakePose {
   final Matrix4 faceTransform;
 }
 
-/// [pose] with the per-loop cap centroid vertices appended (same image/matrices).
-BakePose bakePoseWithCaps(BakePose pose, List<List<int>> loops) => BakePose(
-      image: pose.image,
-      vertices: <Vector3>[
-        ...pose.vertices,
-        ...capVertices(loops, pose.vertices),
-      ],
-      projection: pose.projection,
-      viewMatrix: pose.viewMatrix,
-      faceTransform: pose.faceTransform,
-    );
+/// [pose] with hole rims flattened onto each loop's plane, then flat cap
+/// centroids appended (same image/matrices). Copies verts so the source pose
+/// stays unchanged.
+BakePose bakePoseWithCaps(BakePose pose, List<List<int>> loops) {
+  final List<Vector3> verts = <Vector3>[
+    for (final Vector3 v in pose.vertices) Vector3.copy(v),
+  ];
+  // Eye/mouth rings share one depth → flat openings (ARKit sockets recess them).
+  flattenHoleRims(loops, verts);
+  return BakePose(
+    image: pose.image,
+    vertices: <Vector3>[
+      ...verts,
+      ...capVertices(loops, verts), // depthFactor 0 = flat with the rim plane
+    ],
+    projection: pose.projection,
+    viewMatrix: pose.viewMatrix,
+    faceTransform: pose.faceTransform,
+  );
+}
 
 /// A [BakePose] paired with its per-vertex view-dependent weight (guarded
 /// `n·v`), index-aligned with [BakePose.vertices]. See

@@ -106,11 +106,20 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
   /// (front TrueDepth, ~7 MP) registered with ARKit's view/projection matrices,
   /// then resumes ARKit. Falls back to the ARKit video-res still on any failure,
   /// so a pose is never lost. Defaults to the stable ARKit video path.
-  Future<StillCapture?> captureStill({bool hiRes = false}) async {
+  ///
+  /// [lockAeAwb] (hi-res only): after the first settled shot, lock exposure +
+  /// white-balance and reuse for later poses in this scan.
+  Future<StillCapture?> captureStill({
+    bool hiRes = false,
+    bool lockAeAwb = true,
+  }) async {
     final Map<Object?, Object?>? raw =
         await _control.invokeMethod<Map<Object?, Object?>>(
       'captureStill',
-      <String, Object?>{'hiRes': hiRes},
+      <String, Object?>{
+        'hiRes': hiRes,
+        'lockAeAwb': lockAeAwb,
+      },
     );
     if (raw == null) {
       return null;
@@ -140,6 +149,110 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     await _control.invokeMethod<void>('shareFiles', <String, Object?>{
       'paths': paths,
     });
+  }
+
+  /// Dismisses any native modal (e.g. leftover share sheet) so Flutter sheets
+  /// can present again.
+  Future<void> dismissPresented() async {
+    try {
+      await _control.invokeMethod<void>('dismissPresented');
+    } on PlatformException {
+      // Ignore — best-effort unlock.
+    } on MissingPluginException {
+      // Ignore.
+    }
+  }
+
+  /// Runs the on-device ml-wb CoreML white-balance over [jpegs].
+  ///
+  /// When [matchFrontal] is true, the first JPEG's estimated Kelvin is the
+  /// shared target (all poses → frontal WB). Otherwise [targetKelvin] is used
+  /// (default 5600 = neutral daylight).
+  Future<WhiteBalanceResult?> correctWhiteBalance({
+    required List<Uint8List> jpegs,
+    bool matchFrontal = false,
+    double targetKelvin = 5600,
+  }) async {
+    if (jpegs.isEmpty) {
+      return const WhiteBalanceResult(
+        ok: true,
+        jpegs: <Uint8List>[],
+        targetKelvin: 5600,
+      );
+    }
+    try {
+      final Map<Object?, Object?>? raw =
+          await _control.invokeMethod<Map<Object?, Object?>>(
+        'correctWhiteBalance',
+        <String, Object?>{
+          'jpegs': jpegs,
+          'matchFrontal': matchFrontal,
+          'targetKelvin': targetKelvin,
+        },
+      );
+      if (raw == null) {
+        return null;
+      }
+      final bool ok = raw['ok'] == true;
+      final double kelvin = (raw['targetKelvin'] as num?)?.toDouble() ?? targetKelvin;
+      final String? error = raw['error'] as String?;
+      final String? timingSummary = _formatMlWbTimings(raw['timingsMs']);
+      final Object? list = raw['jpegs'];
+      if (list is! List || list.length != jpegs.length) {
+        return WhiteBalanceResult(
+          ok: false,
+          jpegs: const <Uint8List>[],
+          targetKelvin: kelvin,
+          error: error ?? 'bad jpegs payload',
+          timingSummary: timingSummary,
+        );
+      }
+      final List<Uint8List> out = <Uint8List>[];
+      for (final Object? item in list) {
+        if (item is Uint8List) {
+          out.add(item);
+        } else {
+          return WhiteBalanceResult(
+            ok: false,
+            jpegs: const <Uint8List>[],
+            targetKelvin: kelvin,
+            error: error ?? 'non-bytes jpeg item',
+            timingSummary: timingSummary,
+          );
+        }
+      }
+      return WhiteBalanceResult(
+        ok: ok,
+        jpegs: out,
+        targetKelvin: kelvin,
+        error: error,
+        timingSummary: timingSummary,
+      );
+    } on PlatformException catch (e) {
+      return WhiteBalanceResult(
+        ok: false,
+        jpegs: const <Uint8List>[],
+        targetKelvin: targetKelvin,
+        error: e.message ?? e.code,
+      );
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
+  /// Compact one-liner from native `timingsMs` map (milliseconds).
+  static String? _formatMlWbTimings(Object? raw) {
+    if (raw is! Map) {
+      return null;
+    }
+    double n(String k) => (raw[k] as num?)?.toDouble() ?? 0;
+    final int poses = n('poses').round();
+    return 'ml-wb ${n('batchTotal').round()}ms '
+        '(dec ${n('decode').round()} · '
+        'predΣ ${n('predictSum').round()} · '
+        'applyΣ ${n('applySum').round()} · '
+        'encΣ ${n('encodeSum').round()}'
+        '${poses > 0 ? ' · ×$poses' : ''})';
   }
 
   /// Toggles the native verification overlay (live mesh wireframe + symmetry-axis
@@ -282,4 +395,23 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     await stop();
     await _controller.close();
   }
+}
+
+/// Result of on-device ml-wb white-balance correction.
+class WhiteBalanceResult {
+  const WhiteBalanceResult({
+    required this.ok,
+    required this.jpegs,
+    required this.targetKelvin,
+    this.error,
+    this.timingSummary,
+  });
+
+  final bool ok;
+  final List<Uint8List> jpegs;
+  final double targetKelvin;
+  final String? error;
+
+  /// Native stage breakdown, e.g. `ml-wb 1200ms (dec … · predΣ …)`.
+  final String? timingSummary;
 }

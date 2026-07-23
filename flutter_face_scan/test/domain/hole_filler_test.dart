@@ -87,4 +87,26 @@ void main() {
       expect(cap.z.abs(), greaterThan(0));
     });
   });
+
+  group('flattenHoleRims', () {
+    test('projects rim verts onto a shared plane (same depth)', () {
+      // Triangle hole whose verts sit at different Z — a recessed "socket".
+      final List<Vector3> verts = <Vector3>[
+        Vector3(0, 0, 0),
+        Vector3(1, 0, 0.2),
+        Vector3(0.5, 1, -0.1),
+      ];
+      flattenHoleRims(<List<int>>[
+        <int>[0, 1, 2],
+      ], verts);
+
+      // After flatten, all three lie on one plane: (v1-v0)×(v2-v0) · (v-v0) ≈ 0.
+      final Vector3 e1 = verts[1] - verts[0];
+      final Vector3 e2 = verts[2] - verts[0];
+      final Vector3 n = e1.cross(e2)..normalize();
+      for (final Vector3 v in verts) {
+        expect(n.dot(v - verts[0]).abs(), lessThan(1e-9));
+      }
+    });
+  });
 }

@@ -1,6 +1,7 @@
 import ARKit
 import AVFoundation
 import CoreImage
+import CoreML
 import Flutter
 import SceneKit
 import UIKit
@@ -54,16 +55,40 @@ enum FaceTrackingPlugin {
         manager.stop()
         result(nil)
       case "captureStill":
-        let hiRes = (call.arguments as? [String: Any])?["hiRes"] as? Bool ?? false
+        let args = call.arguments as? [String: Any]
+        let hiRes = args?["hiRes"] as? Bool ?? false
+        let lockAeAwb = args?["lockAeAwb"] as? Bool ?? true
         if hiRes {
-          manager.captureHiResStill(result: result)
+          manager.captureHiResStill(lockAeAwb: lockAeAwb, result: result)
         } else {
           manager.captureStill(result: result)
         }
       case "shareFiles":
         let paths = (call.arguments as? [String: Any])?["paths"] as? [String] ?? []
-        faceScanPresentShare(paths)
-        result(nil)
+        // Present on main; completion resolves the method channel so Dart isn't
+        // left waiting and a stuck sheet can be dismissed cleanly.
+        faceScanPresentShare(paths) {
+          result(nil)
+        }
+      case "dismissPresented":
+        // Unlock Flutter modals after a native share sheet (or other VC) sticks.
+        DispatchQueue.main.async {
+          guard let root = UIApplication.shared.faceScanKeyWindow?.rootViewController
+          else {
+            result(nil)
+            return
+          }
+          if root.presentedViewController != nil {
+            root.dismiss(animated: false) { result(nil) }
+          } else {
+            result(nil)
+          }
+        }
+      case "correctWhiteBalance":
+        // ml-wb CoreML white-balance on pose stills (before bake).
+        // Args: jpegs: [FlutterStandardTypedData], matchFrontal: Bool,
+        //       targetKelvin: Double? (default 5600 when matchFrontal=false).
+        MLWhiteBalanceCorrector.shared.correct(call.arguments, result: result)
       case "configureOverlay":
         let args = call.arguments as? [String: Any]
         let show = args?["showMesh"] as? Bool ?? false
@@ -131,6 +156,10 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   private var activePhotoDelegate: PhotoCaptureDelegate?
   private let photoQueue = DispatchQueue(label: "flutter_face_scan.photo")
 
+  /// ISO / shutter / WB from the first settled hi-res shot; reused when
+  /// `lockAeAwb` is on so later poses don't re-auto and shift colour/exposure.
+  private var lockedLook: LockedCameraLook?
+
   private override init() {
     sceneView = ARSCNView(frame: .zero)
     super.init()
@@ -140,6 +169,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   }
 
   func start() {
+    lockedLook = nil
     guard ARFaceTrackingConfiguration.isSupported else {
       eventSink?(FlutterError(
         code: "unsupported",
@@ -194,6 +224,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   }
 
   func stop() {
+    lockedLook = nil
     sceneView.session.pause()
     isRunning = false
     sentTopology = false
@@ -258,7 +289,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   /// ARKit video-res still captured from the SAME frame, so a pose is never lost
   /// and the app stays usable. On top of that the Dart-side toggle lets the user
   /// switch back to the stable ARKit path with one tap.
-  func captureHiResStill(result: @escaping FlutterResult) {
+  func captureHiResStill(lockAeAwb: Bool, result: @escaping FlutterResult) {
     guard let frame = sceneView.session.currentFrame,
           frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first != nil
     else {
@@ -295,7 +326,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     // Free the TrueDepth camera for AVCapture, then shoot.
     sceneView.session.pause()
 
-    capturePhoto { [weak self] ciImage in
+    capturePhoto(lockAeAwb: lockAeAwb) { [weak self] ciImage in
       guard let self = self else {
         DispatchQueue.main.async { result(fallback) }
         return
@@ -338,7 +369,10 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   /// full-res photo and hands back its (sensor-oriented) `CIImage` — or nil on
   /// any failure. The session is stopped again before completion so the camera
   /// is released for ARKit to resume.
-  private func capturePhoto(completion: @escaping (CIImage?) -> Void) {
+  ///
+  /// When [lockAeAwb] is true: first shot settles auto AE/AWB then stores ISO /
+  /// shutter / WB gains; later shots in this scan re-apply that locked look.
+  private func capturePhoto(lockAeAwb: Bool, completion: @escaping (CIImage?) -> Void) {
     photoQueue.async { [weak self] in
       guard let self = self, self.ensurePhotoSession(),
             let session = self.photoSession, let output = self.photoOutput
@@ -347,21 +381,13 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
         return
       }
 
+      if !lockAeAwb {
+        self.lockedLook = nil
+      }
+
       if !session.isRunning { session.startRunning() }
 
-      // Let auto-exposure / auto-white-balance converge before the shot. A cold
-      // (just-started) session otherwise captures dark, cool-cast ("night blue")
-      // frames — which is why the old slow first capture looked fine (it gave AE
-      // time to settle) while the fast later ones came out blue. Bounded so it
-      // never stalls. Runs on `photoQueue`, so only the paused AR preview waits.
-      if let device = self.photoDevice {
-        Thread.sleep(forTimeInterval: 0.1) // ensure adjustment has kicked in
-        let deadline = Date().addingTimeInterval(0.8)
-        while Date() < deadline,
-              device.isAdjustingExposure || device.isAdjustingWhiteBalance {
-          Thread.sleep(forTimeInterval: 0.03)
-        }
-      }
+      self.applyCameraLook(lockAeAwb: lockAeAwb)
 
       let settings = AVCapturePhotoSettings(format: [
         kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
@@ -380,6 +406,93 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       self.activePhotoDelegate = delegate
       output.capturePhoto(with: settings, delegate: delegate)
     }
+  }
+
+  /// Auto-settle then optionally snapshot/lock, or re-apply a prior lock.
+  /// Must run on `photoQueue` with the photo session running.
+  private func applyCameraLook(lockAeAwb: Bool) {
+    guard let device = photoDevice else { return }
+
+    if lockAeAwb, let look = lockedLook {
+      applyLockedLook(look, on: device)
+      // Brief settle after forcing custom modes (device may still be adjusting).
+      Thread.sleep(forTimeInterval: 0.05)
+      return
+    }
+
+    // Continuous auto + wait until AE/AWB finish adjusting.
+    do {
+      try device.lockForConfiguration()
+      if device.isExposureModeSupported(.continuousAutoExposure) {
+        device.exposureMode = .continuousAutoExposure
+      }
+      if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+        device.whiteBalanceMode = .continuousAutoWhiteBalance
+      }
+      device.unlockForConfiguration()
+    } catch {
+      NSLog("[face_scan] AE/AWB auto config failed: \(error)")
+    }
+
+    Thread.sleep(forTimeInterval: 0.1) // kick adjustment
+    let deadline = Date().addingTimeInterval(0.8)
+    while Date() < deadline,
+          device.isAdjustingExposure || device.isAdjustingWhiteBalance {
+      Thread.sleep(forTimeInterval: 0.03)
+    }
+
+    guard lockAeAwb else { return }
+
+    // Snapshot settled values for later poses (usually after frontal).
+    let iso = device.iso
+    let duration = device.exposureDuration
+    let gains = device.deviceWhiteBalanceGains
+    lockedLook = LockedCameraLook(iso: iso, duration: duration, gains: gains)
+    applyLockedLook(LockedCameraLook(iso: iso, duration: duration, gains: gains), on: device)
+    NSLog(
+      "[face_scan] AE/AWB locked iso=%.0f duration=%.4fs gains=r%.2f g%.2f b%.2f",
+      iso,
+      CMTimeGetSeconds(duration),
+      gains.redGain, gains.greenGain, gains.blueGain
+    )
+  }
+
+  private func applyLockedLook(_ look: LockedCameraLook, on device: AVCaptureDevice) {
+    do {
+      try device.lockForConfiguration()
+      let format = device.activeFormat
+      let iso = min(max(look.iso, format.minISO), format.maxISO)
+      var duration = look.duration
+      if CMTimeCompare(duration, format.minExposureDuration) < 0 {
+        duration = format.minExposureDuration
+      }
+      if CMTimeCompare(duration, format.maxExposureDuration) > 0 {
+        duration = format.maxExposureDuration
+      }
+      if device.isExposureModeSupported(.custom) {
+        device.setExposureModeCustom(duration: duration, iso: iso, completionHandler: nil)
+      }
+      if device.isWhiteBalanceModeSupported(.locked) {
+        let gains = clampWhiteBalanceGains(look.gains, on: device)
+        device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
+      }
+      device.unlockForConfiguration()
+    } catch {
+      NSLog("[face_scan] AE/AWB lock apply failed: \(error)")
+    }
+  }
+
+  private func clampWhiteBalanceGains(
+    _ gains: AVCaptureDevice.WhiteBalanceGains,
+    on device: AVCaptureDevice
+  ) -> AVCaptureDevice.WhiteBalanceGains {
+    let maxG = device.maxWhiteBalanceGain
+    func clamp(_ v: Float) -> Float { min(maxG, max(1.0, v)) }
+    return AVCaptureDevice.WhiteBalanceGains(
+      redGain: clamp(gains.redGain),
+      greenGain: clamp(gains.greenGain),
+      blueGain: clamp(gains.blueGain)
+    )
   }
 
   /// Powers on the photo camera once (configure + start + stop) so the first
@@ -492,6 +605,8 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       "viewMatrix": float32Data(flatten(view)),
       "projectionMatrix": float32Data(flatten(projection)),
       "faceTransform": float32Data(flatten(faceAnchor.transform)),
+      // Face-tracking rarely exposes AVDepthData; log availability for A/B.
+      "hasDepth": frame.capturedDepthData != nil,
     ]
   }
 
@@ -676,6 +791,13 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   }
 }
 
+/// ISO + shutter + white-balance gains frozen after the first settled hi-res shot.
+private struct LockedCameraLook {
+  let iso: Float
+  let duration: CMTime
+  let gains: AVCaptureDevice.WhiteBalanceGains
+}
+
 /// One-shot `AVCapturePhotoCaptureDelegate` that forwards the captured photo as a
 /// (sensor-oriented) `CIImage`, or nil on error. Kept alive by the manager for
 /// the duration of the capture. We request an uncompressed BGRA buffer so the
@@ -710,22 +832,68 @@ final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
 
 /// Native share sheet for the given files (exports the baked model). No plugin,
 /// keeps the SPM build clean.
-private func faceScanPresentShare(_ paths: [String]) {
-  let urls = paths
-    .filter { FileManager.default.fileExists(atPath: $0) }
-    .map { URL(fileURLWithPath: $0) }
-  guard !urls.isEmpty,
-        let root = faceScanTopViewController(UIApplication.shared.faceScanKeyWindow?.rootViewController)
-  else { return }
+///
+/// [done] runs once the sheet is dismissed (share or cancel). Always called on
+/// the main queue — even if presentation fails — so the Flutter method channel
+/// never hangs and a subsequent share can re-present.
+private func faceScanPresentShare(_ paths: [String], done: @escaping () -> Void) {
+  DispatchQueue.main.async {
+    let urls = paths
+      .filter { FileManager.default.fileExists(atPath: $0) }
+      .map { URL(fileURLWithPath: $0) }
+    guard !urls.isEmpty,
+          let root = faceScanTopViewController(
+            UIApplication.shared.faceScanKeyWindow?.rootViewController)
+    else {
+      done()
+      return
+    }
 
+    // Already showing a share sheet (or other modal) — dismiss it first so we
+    // don't stack presentations (common cause of a frozen, undismissable sheet).
+    if root.presentedViewController != nil {
+      root.dismiss(animated: false) {
+        faceScanPresentShareNow(from: root, urls: urls, done: done)
+      }
+      return
+    }
+    faceScanPresentShareNow(from: root, urls: urls, done: done)
+  }
+}
+
+private func faceScanPresentShareNow(
+  from root: UIViewController,
+  urls: [URL],
+  done: @escaping () -> Void
+) {
   let activity = UIActivityViewController(activityItems: urls, applicationActivities: nil)
-  // iPad requires a popover anchor — without it, presenting crashes.
+  activity.completionWithItemsHandler = { _, _, _, _ in
+    DispatchQueue.main.async { done() }
+  }
+
+  // iPad requires a popover anchor — without it, presenting crashes. Pin to the
+  // top-trailing corner (where the Flutter share button lives) instead of the
+  // screen centre; a centre popover with no arrow often eats the whole screen
+  // and feels "stuck".
   if let popover = activity.popoverPresentationController {
     popover.sourceView = root.view
-    popover.sourceRect = CGRect(x: root.view.bounds.midX, y: root.view.bounds.midY, width: 0, height: 0)
-    popover.permittedArrowDirections = []
+    let bounds = root.view.bounds
+    let top = root.view.safeAreaInsets.top
+    popover.sourceRect = CGRect(
+      x: bounds.maxX - 44,
+      y: top + 12,
+      width: 32,
+      height: 32
+    )
+    popover.permittedArrowDirections = [.up, .right]
   }
-  root.present(activity, animated: true)
+
+  root.present(activity, animated: true) {
+    // If present somehow no-ops (already presenting), still unblock Dart.
+    if root.presentedViewController !== activity {
+      done()
+    }
+  }
 }
 
 /// Deepest presented view controller, so the share sheet attaches to whatever is
@@ -781,3 +949,413 @@ final class FacePreviewView: NSObject, FlutterPlatformView {
     return sceneView
   }
 }
+
+// MARK: - ml-wb CoreML white-balance (on-device)
+
+/// Ports `ml-wb/src/infer.py:correct_array` to CoreML: estimate Kelvin → delta →
+/// U-Net@256 → per-pixel gain ratio upsampled to full res. Model lives in
+/// `Runner/Models/MLWhiteBalance.mlpackage` (exported from the untouched ml-wb
+/// checkpoint). Failures return the original JPEGs so bake never hard-fails.
+final class MLWhiteBalanceCorrector {
+  static let shared = MLWhiteBalanceCorrector()
+
+  private static let imageSize = 256
+  private static let defaultKelvin: Float = 5600
+  private static let kelvinMin: Float = 2700
+  private static let kelvinMax: Float = 8500
+  private static let deltaMin: Float = -5800
+  private static let deltaMax: Float = 5800
+
+  private let queue = DispatchQueue(label: "flutter_face_scan.ml_wb", qos: .userInitiated)
+  private var model: MLModel?
+
+  private init() {
+    queue.async { [weak self] in
+      self?.loadModelIfNeeded()
+    }
+  }
+
+  func correct(_ arguments: Any?, result: @escaping FlutterResult) {
+    queue.async {
+      let out = self.correctSync(arguments)
+      DispatchQueue.main.async { result(out) }
+    }
+  }
+
+  private func correctSync(_ arguments: Any?) -> [String: Any] {
+    let tBatch = CFAbsoluteTimeGetCurrent()
+    guard let args = arguments as? [String: Any] else {
+      return ["ok": false, "error": "bad args", "jpegs": [] as [Any]]
+    }
+    let rawJpegs = args["jpegs"] as? [Any] ?? []
+    let datas: [Data] = rawJpegs.compactMap { item in
+      if let t = item as? FlutterStandardTypedData { return t.data }
+      if let d = item as? Data { return d }
+      return nil
+    }
+    guard !datas.isEmpty else {
+      return ["ok": false, "error": "no jpegs", "jpegs": [] as [Any]]
+    }
+
+    let matchFrontal = args["matchFrontal"] as? Bool ?? false
+    var targetKelvin = Self.defaultKelvin
+    if let t = args["targetKelvin"] as? Double {
+      targetKelvin = Float(t)
+    }
+
+    // Decode all images first (need frontal Kelvin when matchFrontal).
+    var images: [CGImage] = []
+    images.reserveCapacity(datas.count)
+    var decodeMs: Double = 0
+    for data in datas {
+      let t0 = CFAbsoluteTimeGetCurrent()
+      guard let img = self.cgImage(from: data) else {
+        return [
+          "ok": false,
+          "error": "decode failed",
+          "jpegs": datas.map { FlutterStandardTypedData(bytes: $0) },
+        ]
+      }
+      decodeMs += (CFAbsoluteTimeGetCurrent() - t0) * 1000
+      images.append(img)
+    }
+
+    var kelvinMs: Double = 0
+    if matchFrontal, let first = images.first {
+      let t0 = CFAbsoluteTimeGetCurrent()
+      targetKelvin = estimateKelvin(first)
+      kelvinMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+    }
+
+    guard loadModelIfNeeded() != nil else {
+      return [
+        "ok": false,
+        "error": "model unavailable",
+        "jpegs": datas.map { FlutterStandardTypedData(bytes: $0) },
+      ]
+    }
+
+    var outJpegs: [FlutterStandardTypedData] = []
+    outJpegs.reserveCapacity(images.count)
+    var sumPredict: Double = 0
+    var sumApply: Double = 0
+    var sumEncode: Double = 0
+    for (i, cg) in images.enumerated() {
+      let tPose = CFAbsoluteTimeGetCurrent()
+      if let corrected = correctImageTimed(cg, targetKelvin: targetKelvin) {
+        let tEnc = CFAbsoluteTimeGetCurrent()
+        if let jpeg = jpegData(corrected.image, quality: 0.95) {
+          let encMs = (CFAbsoluteTimeGetCurrent() - tEnc) * 1000
+          sumEncode += encMs
+          outJpegs.append(FlutterStandardTypedData(bytes: jpeg))
+          var timing = corrected.timing
+          timing["encode"] = encMs
+          timing["poseTotal"] = (CFAbsoluteTimeGetCurrent() - tPose) * 1000
+          sumPredict += timing["predict"] ?? 0
+          sumApply += timing["apply"] ?? 0
+          NSLog(
+            "[face_scan] ml-wb pose%d ms: rgba=%.0f kelvin=%.0f resize=%.0f pack=%.0f predict=%.0f ratio=%.0f upsample=%.0f apply=%.0f encode=%.0f total=%.0f (%dx%d)",
+            i,
+            timing["rgba"] ?? 0, timing["kelvin"] ?? 0, timing["resize"] ?? 0,
+            timing["pack"] ?? 0, timing["predict"] ?? 0, timing["ratio"] ?? 0,
+            timing["upsample"] ?? 0, timing["apply"] ?? 0, encMs,
+            timing["poseTotal"] ?? 0, cg.width, cg.height
+          )
+        } else {
+          outJpegs.append(FlutterStandardTypedData(bytes: datas[i]))
+        }
+      } else {
+        outJpegs.append(FlutterStandardTypedData(bytes: datas[i]))
+      }
+    }
+    let batchMs = (CFAbsoluteTimeGetCurrent() - tBatch) * 1000
+    NSLog(
+      "[face_scan] ml-wb BATCH ms: decode=%.0f kelvinRef=%.0f predictΣ=%.0f applyΣ=%.0f encodeΣ=%.0f total=%.0f poses=%d",
+      decodeMs, kelvinMs, sumPredict, sumApply, sumEncode, batchMs, images.count
+    )
+    return [
+      "ok": true,
+      "targetKelvin": Double(targetKelvin),
+      "jpegs": outJpegs,
+      "timingsMs": [
+        "decode": decodeMs,
+        "kelvinRef": kelvinMs,
+        "predictSum": sumPredict,
+        "applySum": sumApply,
+        "encodeSum": sumEncode,
+        "batchTotal": batchMs,
+        "poses": Double(images.count),
+      ] as [String: Double],
+    ]
+  }
+
+  @discardableResult
+  private func loadModelIfNeeded() -> MLModel? {
+    if let model { return model }
+    let url =
+      Bundle.main.url(forResource: "MLWhiteBalance", withExtension: "mlmodelc")
+      ?? Bundle.main.url(forResource: "MLWhiteBalance", withExtension: "mlpackage")
+    guard let url else {
+      NSLog("[face_scan] MLWhiteBalance model not in bundle")
+      return nil
+    }
+    do {
+      let compiled: URL
+      if url.pathExtension == "mlpackage" {
+        compiled = try MLModel.compileModel(at: url)
+      } else {
+        compiled = url
+      }
+      let cfg = MLModelConfiguration()
+      cfg.computeUnits = .all
+      model = try MLModel(contentsOf: compiled, configuration: cfg)
+      return model
+    } catch {
+      NSLog("[face_scan] MLWhiteBalance load failed: \(error)")
+      return nil
+    }
+  }
+
+  /// Per-image correction result + stage timings (milliseconds).
+  private struct CorrectedImage {
+    let image: CGImage
+    let timing: [String: Double]
+  }
+
+  private func correctImageTimed(_ cg: CGImage, targetKelvin: Float) -> CorrectedImage? {
+    guard let model else { return nil }
+    let w = cg.width
+    let h = cg.height
+    var timing: [String: Double] = [:]
+
+    let tRgba = CFAbsoluteTimeGetCurrent()
+    guard w > 0, h > 0, let rgba = rgbaBytes(cg) else { return nil }
+    timing["rgba"] = (CFAbsoluteTimeGetCurrent() - tRgba) * 1000
+
+    let tKel = CFAbsoluteTimeGetCurrent()
+    let kIn = estimateKelvin(rgba: rgba, width: w, height: h)
+    timing["kelvin"] = (CFAbsoluteTimeGetCurrent() - tKel) * 1000
+    let delta = max(Self.deltaMin, min(Self.deltaMax, kIn - targetKelvin))
+
+    let size = Self.imageSize
+    let tResize = CFAbsoluteTimeGetCurrent()
+    guard let resized = resizeRGBA(rgba, width: w, height: h, to: size) else {
+      return nil
+    }
+    timing["resize"] = (CFAbsoluteTimeGetCurrent() - tResize) * 1000
+
+    let tPack = CFAbsoluteTimeGetCurrent()
+    guard let imageArr = try? MLMultiArray(
+            shape: [1, 3, NSNumber(value: size), NSNumber(value: size)],
+            dataType: .float32
+          ),
+          let deltaArr = try? MLMultiArray(shape: [1], dataType: .float32)
+    else { return nil }
+
+    let plane = size * size
+    for y in 0..<size {
+      for x in 0..<size {
+        let src = (y * size + x) * 4
+        let dst = y * size + x
+        imageArr[dst] = NSNumber(value: Float(resized[src]) / 255)
+        imageArr[plane + dst] = NSNumber(value: Float(resized[src + 1]) / 255)
+        imageArr[2 * plane + dst] = NSNumber(value: Float(resized[src + 2]) / 255)
+      }
+    }
+    deltaArr[0] = NSNumber(value: delta)
+    timing["pack"] = (CFAbsoluteTimeGetCurrent() - tPack) * 1000
+
+    let provider: MLFeatureProvider
+    do {
+      provider = try MLDictionaryFeatureProvider(dictionary: [
+        "image": MLFeatureValue(multiArray: imageArr),
+        "delta": MLFeatureValue(multiArray: deltaArr),
+      ])
+    } catch {
+      return nil
+    }
+
+    let tPred = CFAbsoluteTimeGetCurrent()
+    guard let out = try? model.prediction(from: provider),
+          let corrected = out.featureValue(for: "corrected")?.multiArrayValue
+    else { return nil }
+    timing["predict"] = (CFAbsoluteTimeGetCurrent() - tPred) * 1000
+
+    let tRatio = CFAbsoluteTimeGetCurrent()
+    var ratio = [Float](repeating: 1, count: size * size * 3)
+    for c in 0..<3 {
+      for i in 0..<plane {
+        let inVal = Float(resized[i * 4 + c]) / 255 + 1e-6
+        let outVal = corrected[c * plane + i].floatValue
+        ratio[c * plane + i] = max(0.1, min(4.0, outVal / inVal))
+      }
+    }
+    timing["ratio"] = (CFAbsoluteTimeGetCurrent() - tRatio) * 1000
+
+    let tUp = CFAbsoluteTimeGetCurrent()
+    guard let ratioFull = upsamplePlanar(
+      ratio, channels: 3, srcSize: size, dstW: w, dstH: h
+    ) else { return nil }
+    timing["upsample"] = (CFAbsoluteTimeGetCurrent() - tUp) * 1000
+
+    let tApply = CFAbsoluteTimeGetCurrent()
+    var outRGBA = [UInt8](repeating: 0, count: w * h * 4)
+    let fullPlane = w * h
+    for i in 0..<fullPlane {
+      let src = i * 4
+      for c in 0..<3 {
+        let v = Float(rgba[src + c]) / 255 * ratioFull[c * fullPlane + i]
+        outRGBA[src + c] = UInt8(max(0, min(255, Int((v * 255).rounded()))))
+      }
+      outRGBA[src + 3] = 255
+    }
+    guard let outCg = cgImage(rgba: outRGBA, width: w, height: h) else {
+      return nil
+    }
+    timing["apply"] = (CFAbsoluteTimeGetCurrent() - tApply) * 1000
+    return CorrectedImage(image: outCg, timing: timing)
+  }
+
+  // MARK: - Kelvin (McCamy CCT from brightest ~5% pixels; matches ml-wb intent)
+
+  private func estimateKelvin(_ cg: CGImage) -> Float {
+    guard let rgba = rgbaBytes(cg) else { return Self.defaultKelvin }
+    return estimateKelvin(rgba: rgba, width: cg.width, height: cg.height)
+  }
+
+  private func estimateKelvin(rgba: [UInt8], width: Int, height: Int) -> Float {
+    let n = width * height
+    guard n >= 10 else { return Self.defaultKelvin }
+    var brightness = [Float](repeating: 0, count: n)
+    for i in 0..<n {
+      let o = i * 4
+      brightness[i] =
+        (Float(rgba[o]) + Float(rgba[o + 1]) + Float(rgba[o + 2])) / (3 * 255)
+    }
+    let sorted = brightness.sorted()
+    let thresh = sorted[Int(Double(n) * 0.95)]
+    var sr: Float = 0, sg: Float = 0, sb: Float = 0, count: Float = 0
+    for i in 0..<n where brightness[i] >= thresh {
+      let o = i * 4
+      sr += Float(rgba[o]) / 255
+      sg += Float(rgba[o + 1]) / 255
+      sb += Float(rgba[o + 2]) / 255
+      count += 1
+    }
+    guard count >= 10 else { return Self.defaultKelvin }
+
+    // Approximate sRGB → linear → XYZ → xy → McCamy CCT.
+    let r = max(1e-6 as Float, pow(sr / count, 2.2))
+    let g = max(1e-6 as Float, pow(sg / count, 2.2))
+    let b = max(1e-6 as Float, pow(sb / count, 2.2))
+    let x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
+    let y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
+    let z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+    let sum = x + y + z
+    guard sum > 1e-8 else { return Self.defaultKelvin }
+    let cx = x / sum
+    let cy = y / sum
+    let nMc = (cx - 0.3320) / (0.1858 - cy)
+    let cct = -449 * nMc * nMc * nMc + 3525 * nMc * nMc - 6823.3 * nMc + 5520.33
+    return max(Self.kelvinMin, min(Self.kelvinMax, cct))
+  }
+
+  // MARK: - Image helpers
+
+  private func cgImage(from jpeg: Data) -> CGImage? {
+    guard let ui = UIImage(data: jpeg), let cg = ui.cgImage else { return nil }
+    return cg
+  }
+
+  private func jpegData(_ cg: CGImage, quality: CGFloat) -> Data? {
+    UIImage(cgImage: cg).jpegData(compressionQuality: quality)
+  }
+
+  private func rgbaBytes(_ cg: CGImage) -> [UInt8]? {
+    let w = cg.width
+    let h = cg.height
+    var bytes = [UInt8](repeating: 0, count: w * h * 4)
+    guard let ctx = CGContext(
+      data: &bytes,
+      width: w,
+      height: h,
+      bitsPerComponent: 8,
+      bytesPerRow: w * 4,
+      space: CGColorSpaceCreateDeviceRGB(),
+      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+    return bytes
+  }
+
+  private func cgImage(rgba: [UInt8], width: Int, height: Int) -> CGImage? {
+    var bytes = rgba
+    guard let ctx = CGContext(
+      data: &bytes,
+      width: width,
+      height: height,
+      bitsPerComponent: 8,
+      bytesPerRow: width * 4,
+      space: CGColorSpaceCreateDeviceRGB(),
+      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ), let img = ctx.makeImage() else { return nil }
+    return img
+  }
+
+  private func resizeRGBA(
+    _ rgba: [UInt8], width: Int, height: Int, to size: Int
+  ) -> [UInt8]? {
+    guard let src = cgImage(rgba: rgba, width: width, height: height) else {
+      return nil
+    }
+    var out = [UInt8](repeating: 0, count: size * size * 4)
+    guard let ctx = CGContext(
+      data: &out,
+      width: size,
+      height: size,
+      bitsPerComponent: 8,
+      bytesPerRow: size * 4,
+      space: CGColorSpaceCreateDeviceRGB(),
+      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    ctx.interpolationQuality = .high
+    ctx.draw(src, in: CGRect(x: 0, y: 0, width: size, height: size))
+    return out
+  }
+
+  /// Bilinear upsample planar CHW float buffer to dstW×dstH.
+  private func upsamplePlanar(
+    _ src: [Float], channels: Int, srcSize: Int, dstW: Int, dstH: Int
+  ) -> [Float]? {
+    let srcPlane = srcSize * srcSize
+    let dstPlane = dstW * dstH
+    var dst = [Float](repeating: 0, count: channels * dstPlane)
+    let scaleX = Float(srcSize - 1) / Float(max(dstW - 1, 1))
+    let scaleY = Float(srcSize - 1) / Float(max(dstH - 1, 1))
+    for c in 0..<channels {
+      let sBase = c * srcPlane
+      let dBase = c * dstPlane
+      for y in 0..<dstH {
+        let fy = Float(y) * scaleY
+        let y0 = Int(fy)
+        let y1 = min(y0 + 1, srcSize - 1)
+        let ty = fy - Float(y0)
+        for x in 0..<dstW {
+          let fx = Float(x) * scaleX
+          let x0 = Int(fx)
+          let x1 = min(x0 + 1, srcSize - 1)
+          let tx = fx - Float(x0)
+          let v00 = src[sBase + y0 * srcSize + x0]
+          let v10 = src[sBase + y0 * srcSize + x1]
+          let v01 = src[sBase + y1 * srcSize + x0]
+          let v11 = src[sBase + y1 * srcSize + x1]
+          let v0 = v00 + (v10 - v00) * tx
+          let v1 = v01 + (v11 - v01) * tx
+          dst[dBase + y * dstW + x] = v0 + (v1 - v0) * ty
+        }
+      }
+    }
+    return dst
+  }
+}
+
