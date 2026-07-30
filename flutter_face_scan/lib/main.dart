@@ -2,32 +2,32 @@ import 'package:flutter/material.dart';
 
 import 'features/face_capture/presentation/capture_page.dart';
 import 'features/face_capture/presentation/scan_theme.dart';
+import 'features/face_capture/presentation/theme_settings.dart';
 
-void main() {
-  runApp(const FaceScanApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final ThemeSettings themeSettings = ThemeSettings();
+  await themeSettings.load();
+  runApp(FaceScanApp(themeSettings: themeSettings));
 }
 
 class FaceScanApp extends StatelessWidget {
-  const FaceScanApp({super.key});
+  const FaceScanApp({required this.themeSettings, super.key});
+
+  final ThemeSettings themeSettings;
 
   @override
   Widget build(BuildContext context) {
-    final Color accent = ScanTheme.accent;
-    return MaterialApp(
-      title: 'Face Scan',
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        colorScheme: ColorScheme.dark(
-          primary: accent,
-          secondary: accent,
-          surface: Colors.black,
-        ),
-        scaffoldBackgroundColor: Colors.black,
-        filledButtonTheme: FilledButtonThemeData(style: ScanTheme.primaryButton),
+    return ListenableBuilder(
+      listenable: themeSettings,
+      builder: (BuildContext context, Widget? _) => MaterialApp(
+        title: 'Face Scan',
+        theme: ScanTheme.light(),
+        darkTheme: ScanTheme.dark(),
+        themeMode: themeSettings.mode,
+        debugShowCheckedModeBanner: false,
+        home: CapturePage(themeSettings: themeSettings),
       ),
-      debugShowCheckedModeBanner: false,
-      home: const CapturePage(),
     );
   }
 }

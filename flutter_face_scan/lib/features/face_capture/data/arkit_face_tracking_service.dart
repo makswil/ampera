@@ -81,24 +81,32 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
       return;
     }
     _running = true;
-    _frameSubscription ??= _frames.receiveBroadcastStream().listen(
-          _onFrame,
-          onError: (Object error, StackTrace stackTrace) {
-            if (error is PlatformException) {
-              _controller.addError(
-                PlatformException(
-                  code: error.code,
-                  message: error.message,
-                  details: error.details,
-                ),
-                stackTrace,
-              );
-            } else {
-              _controller.addError(error, stackTrace);
-            }
-          },
-        );
-    await _control.invokeMethod<void>('start');
+    try {
+      _frameSubscription ??= _frames.receiveBroadcastStream().listen(
+            _onFrame,
+            onError: (Object error, StackTrace stackTrace) {
+              if (error is PlatformException) {
+                _controller.addError(
+                  PlatformException(
+                    code: error.code,
+                    message: error.message,
+                    details: error.details,
+                  ),
+                  stackTrace,
+                );
+              } else {
+                _controller.addError(error, stackTrace);
+              }
+            },
+          );
+      await _control.invokeMethod<void>('start');
+    } on Object {
+      // Leave the service idle so a later Start can retry (e.g. after permission).
+      _running = false;
+      await _frameSubscription?.cancel();
+      _frameSubscription = null;
+      rethrow;
+    }
   }
 
   @override

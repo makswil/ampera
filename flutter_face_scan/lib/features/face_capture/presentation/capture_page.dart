@@ -32,12 +32,15 @@ import 'onboarding_store.dart';
 import 'pose_guidance_copy.dart';
 import 'scan_theme.dart';
 import 'scans_manager_page.dart';
+import 'theme_settings.dart';
 import 'widgets/capture_overlay.dart';
 import 'widgets/scan_onboarding_sheet.dart';
 
 /// Guided capture entry: wires ARKit preview, BLoC, and [CaptureOverlay].
 class CapturePage extends StatefulWidget {
-  const CapturePage({super.key});
+  const CapturePage({required this.themeSettings, super.key});
+
+  final ThemeSettings themeSettings;
 
   static const String previewViewType = 'flutter_face_scan/face_preview';
 
@@ -51,6 +54,7 @@ class _CapturePageState extends State<CapturePage> {
   late final GuidedPoseValidator _guidedValidator;
   late final ExpressionAwarePoseValidator _poseValidator;
   final DebugSettings _debug = DebugSettings();
+  ThemeSettings get _theme => widget.themeSettings;
 
   /// Expression chosen in the idle picker; applied on the next Start.
   ExpressionMode _selectedExpression = ExpressionMode.neutral;
@@ -143,17 +147,27 @@ class _CapturePageState extends State<CapturePage> {
     _guidedValidator = GuidedPoseValidator(axisExtractor: extractor);
     _poseValidator = ExpressionAwarePoseValidator(inner: _guidedValidator);
     _syncDistanceTolerance();
-    // Don't auto-start: the user starts each scan from the Start button so the
-    // preview + guidance don't run until asked.
     _bloc = CaptureBloc(
       trackingService: _trackingService,
       poseValidator: _poseValidator,
     );
 
+    // Live preview immediately; Start only begins guided capture / saving.
+    unawaited(_startPreview());
+
     // Re-push the overlay config whenever a debug toggle changes.
     _debug.addListener(_onDebugChanged);
     _applyOverlay();
     unawaited(_loadNewestSession());
+  }
+
+  /// Boots the native AR session for the camera view without capturing frames.
+  Future<void> _startPreview() async {
+    try {
+      await _trackingService.start();
+    } on Object {
+      // Permission / hardware failures surface when the user taps Start.
+    }
   }
 
   /// Restores the newest on-disk session so Bake works without a fresh scan.
@@ -261,83 +275,113 @@ class _CapturePageState extends State<CapturePage> {
     }());
   }
 
-  /// Settings sheet (distance, scans, dev toggles). Help is the `?` button.
+  void _openScansManager() {
+    unawaited(
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => const ScansManagerPage(),
+        ),
+      ),
+    );
+  }
+
+  /// Settings sheet (appearance, distance, dev toggles). Help is `?`.
   void _openSettings() {
-    unawaited(_showSettingsSheet(
+    unawaited(_openSettingsPage(
       title: 'Settings',
-      buildChildren: () => <Widget>[
-        ListTile(
-          leading: const Icon(Icons.folder_outlined),
-          title: const Text('Manage saved scans'),
-          subtitle: const Text('List / delete session folders'),
-          onTap: () {
-            Navigator.of(context, rootNavigator: true).pop();
-            unawaited(
-              Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => const ScansManagerPage(),
+      buildChildren: () {
+        final bool dark = _theme.isDark(
+          MediaQuery.platformBrightnessOf(context),
+        );
+        return <Widget>[
+          ListTile(
+            title: const Text('Dark mode'),
+            subtitle: _theme.mode == ThemeMode.system
+                ? const Text('Following system')
+                : null,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Icon(
+                  Icons.wb_sunny_outlined,
+                  size: 20,
+                  color: dark
+                      ? Theme.of(context).disabledColor
+                      : ScanTheme.accent,
                 ),
-              ),
-            );
-          },
-        ),
-        const Divider(height: 1),
-        ListTile(
-          title: Text(
-            'Face distance: '
-            '${(_debug.targetDistanceMeters * 100).round()} cm',
+                Switch(
+                  value: dark,
+                  onChanged: _theme.setDark,
+                ),
+                Icon(
+                  Icons.dark_mode_outlined,
+                  size: 20,
+                  color: dark
+                      ? ScanTheme.accent
+                      : Theme.of(context).disabledColor,
+                ),
+              ],
+            ),
+            onTap: () => _theme.setDark(!dark),
           ),
-          subtitle: const Text(
-            'Closer fills the outline more. '
-            'Too close can clip on side angles.',
+          const Divider(height: 1),
+          ListTile(
+            title: Text(
+              'Face distance: '
+              '${(_debug.targetDistanceMeters * 100).round()} cm',
+            ),
+            subtitle: const Text(
+              'Closer fills the outline more. '
+              'Too close can clip on side angles.',
+            ),
           ),
-        ),
-        Slider(
-          value: _debug.targetDistanceMeters,
-          min: PoseTolerance.kMinTargetDistanceMeters,
-          max: PoseTolerance.kMaxTargetDistanceMeters,
-          divisions: 20,
-          label: '${(_debug.targetDistanceMeters * 100).round()} cm',
-          onChanged: (double v) => _debug.targetDistanceMeters = v,
-        ),
-        const Divider(height: 1),
-        SwitchListTile(
-          title: const Text('Calibration HUD'),
-          value: _debug.showHud,
-          onChanged: (bool v) => _debug.showHud = v,
-        ),
-        SwitchListTile(
-          title: const Text('Face mesh overlay'),
-          value: _debug.showMesh,
-          onChanged: (bool v) => _debug.showMesh = v,
-        ),
-        SwitchListTile(
-          title: const Text('Texture: AVCapture hi-res'),
-          subtitle: const Text(
-            'On = 7 MP photo per pose (sharper). '
-            'Off = ARKit video (stable).',
+          Slider(
+            value: _debug.targetDistanceMeters,
+            min: PoseTolerance.kMinTargetDistanceMeters,
+            max: PoseTolerance.kMaxTargetDistanceMeters,
+            divisions: 20,
+            label: '${(_debug.targetDistanceMeters * 100).round()} cm',
+            onChanged: (double v) => _debug.targetDistanceMeters = v,
           ),
-          value: _debug.hiResPhoto,
-          onChanged: (bool v) => _debug.hiResPhoto = v,
-        ),
-        SwitchListTile(
-          title: const Text('Lock AE/AWB after first shot'),
-          subtitle: Text(
-            _debug.hiResPhoto
-                ? 'On = reuse ISO/shutter/WB from the first hi-res pose '
-                    '(usually frontal). Off = auto per pose.'
-                : 'Enable AVCapture hi-res first.',
+          const Divider(height: 1),
+          SwitchListTile(
+            title: const Text('Calibration HUD'),
+            value: _debug.showHud,
+            onChanged: (bool v) => _debug.showHud = v,
           ),
-          value: _debug.lockAeAwb,
-          onChanged:
-              _debug.hiResPhoto ? (bool v) => _debug.lockAeAwb = v : null,
-        ),
-      ],
+          SwitchListTile(
+            title: const Text('Face mesh overlay'),
+            value: _debug.showMesh,
+            onChanged: (bool v) => _debug.showMesh = v,
+          ),
+          SwitchListTile(
+            title: const Text('Texture: AVCapture hi-res'),
+            subtitle: const Text(
+              'On = 7 MP photo per pose (sharper). '
+              'Off = ARKit video (stable).',
+            ),
+            value: _debug.hiResPhoto,
+            onChanged: (bool v) => _debug.hiResPhoto = v,
+          ),
+          SwitchListTile(
+            title: const Text('Lock AE/AWB after first shot'),
+            subtitle: Text(
+              _debug.hiResPhoto
+                  ? 'On = reuse ISO/shutter/WB from the first hi-res pose '
+                      '(usually frontal). Off = auto per pose.'
+                  : 'Enable AVCapture hi-res first.',
+            ),
+            value: _debug.lockAeAwb,
+            onChanged:
+                _debug.hiResPhoto ? (bool v) => _debug.lockAeAwb = v : null,
+          ),
+        ];
+      },
     ));
   }
 
   void _openBakeSettings() {
-    unawaited(_showSettingsSheet(
+    unawaited(_openSettingsPage(
       title: 'Bake settings',
       buildChildren: () => <Widget>[
         SwitchListTile(
@@ -442,7 +486,7 @@ class _CapturePageState extends State<CapturePage> {
           onTap: _baking || _lastSession == null
               ? null
               : () {
-                  Navigator.of(context, rootNavigator: true).pop();
+                  Navigator.of(context).pop();
                   unawaited(_bakeTexture());
                 },
         ),
@@ -450,44 +494,119 @@ class _CapturePageState extends State<CapturePage> {
     ));
   }
 
-  Future<void> _showSettingsSheet({
+  /// Full-screen settings page (square chrome — no bottom sheet).
+  Future<void> _openSettingsPage({
     required String title,
     required List<Widget> Function() buildChildren,
   }) async {
-    // Share sheet can leave a native modal that blocks Flutter sheets.
+    // Share sheet can leave a native modal that blocks Flutter routes.
     await _trackingService.dismissPresented();
     if (!mounted) {
       return;
     }
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useRootNavigator: true,
-      builder: (BuildContext sheetContext) => ListenableBuilder(
-        listenable: _debug,
-        builder: (BuildContext context, Widget? _) {
-          final double maxH = MediaQuery.sizeOf(context).height * 0.85;
-          return SafeArea(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxHeight: maxH),
-              child: ListView(
-                shrinkWrap: true,
-                children: <Widget>[
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                    child: Text(
-                      title,
-                      style: Theme.of(context).textTheme.titleMedium,
+    await Navigator.of(context).push<void>(
+      PageRouteBuilder<void>(
+        pageBuilder: (
+          BuildContext pageContext,
+          Animation<double> animation,
+          Animation<double> secondaryAnimation,
+        ) {
+          return ListenableBuilder(
+            listenable: Listenable.merge(<Listenable>[_debug, _theme]),
+            builder: (BuildContext context, Widget? _) {
+              final ColorScheme scheme = Theme.of(context).colorScheme;
+              const double pageInset = 28;
+              return Scaffold(
+                backgroundColor: scheme.surface,
+                body: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: <Widget>[
+                    SafeArea(
+                      bottom: false,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(
+                          pageInset,
+                          12,
+                          pageInset - 8,
+                          16,
+                        ),
+                        child: Row(
+                          children: <Widget>[
+                            Expanded(
+                              child: Text(
+                                title,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleLarge
+                                    ?.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: -0.2,
+                                    ),
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'Close',
+                              icon: const Icon(Icons.close),
+                              onPressed: () => Navigator.of(context).pop(),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
-                  ),
-                  // Rebuild switches on every notifyListeners — a fixed children
-                  // list would freeze SwitchListTile.value at open-time.
-                  ...buildChildren(),
-                ],
-              ),
-            ),
+                    Divider(
+                      height: 1,
+                      thickness: 1,
+                      color: scheme.onSurface.withValues(alpha: 0.12),
+                    ),
+                    Expanded(
+                      child: Theme(
+                        data: Theme.of(context).copyWith(
+                          listTileTheme: const ListTileThemeData(
+                            contentPadding: EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 2,
+                            ),
+                            minVerticalPadding: 6,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.zero,
+                            ),
+                          ),
+                        ),
+                        child: ListView(
+                          padding: const EdgeInsets.fromLTRB(
+                            pageInset,
+                            12,
+                            pageInset,
+                            48,
+                          ),
+                          // Rebuild on every notifyListeners — a fixed children
+                          // list would freeze SwitchListTile.value at open-time.
+                          children: buildChildren(),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
           );
         },
+        transitionsBuilder: (
+          BuildContext context,
+          Animation<double> animation,
+          Animation<double> secondaryAnimation,
+          Widget child,
+        ) {
+          return FadeTransition(
+            opacity: CurvedAnimation(
+              parent: animation,
+              curve: Curves.easeOut,
+            ),
+            child: child,
+          );
+        },
+        transitionDuration: const Duration(milliseconds: 180),
+        reverseTransitionDuration: const Duration(milliseconds: 140),
       ),
     );
   }
@@ -769,7 +888,7 @@ class _CapturePageState extends State<CapturePage> {
           ),
         ],
         child: Scaffold(
-          backgroundColor: Colors.black,
+          backgroundColor: Theme.of(context).scaffoldBackgroundColor,
           body: Stack(
             fit: StackFit.expand,
             children: <Widget>[
@@ -869,6 +988,19 @@ class _CapturePageState extends State<CapturePage> {
                             size: 24,
                           ),
                           onPressed: _openBakeSettings,
+                        ),
+                        Semantics(
+                          button: true,
+                          label: 'Manage saved scans',
+                          child: IconButton(
+                            tooltip: 'Saved scans',
+                            icon: const Icon(
+                              Icons.folder_outlined,
+                              color: Colors.white70,
+                              size: 24,
+                            ),
+                            onPressed: _openScansManager,
+                          ),
                         ),
                         Semantics(
                           button: true,

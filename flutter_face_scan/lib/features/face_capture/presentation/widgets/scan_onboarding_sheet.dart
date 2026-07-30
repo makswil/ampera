@@ -20,6 +20,10 @@ Future<bool?> showScanOnboardingSheet(
       Animation<double> animation,
       Animation<double> secondaryAnimation,
     ) {
+      final Brightness brightness = Theme.of(dialogContext).brightness;
+      final Color onSurface =
+          Theme.of(dialogContext).colorScheme.onSurface;
+      final Color muted = onSurface.withValues(alpha: 0.70);
       return SafeArea(
         child: Center(
           child: FadeTransition(
@@ -35,7 +39,7 @@ Future<bool?> showScanOnboardingSheet(
                   child: Container(
                     margin: const EdgeInsets.symmetric(horizontal: 28),
                     padding: const EdgeInsets.fromLTRB(32, 36, 32, 32),
-                    decoration: ScanTheme.dialogSurface,
+                    decoration: ScanTheme.dialogSurface(brightness),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -49,26 +53,29 @@ Future<bool?> showScanOnboardingSheet(
                               .textTheme
                               .titleLarge
                               ?.copyWith(
-                                color: Colors.white,
+                                color: onSurface,
                                 fontWeight: FontWeight.w600,
                               ),
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 20),
-                        const _Bullet(
+                        _Bullet(
                           icon: Icons.filter_4,
                           text:
                               "We'll capture 4 angles — front, left, right, chin up.",
+                          muted: muted,
                         ),
-                        const _Bullet(
+                        _Bullet(
                           icon: Icons.timer_outlined,
                           text:
                               'Hold still for about 2–3 seconds at each angle.',
+                          muted: muted,
                         ),
-                        const _Bullet(
+                        _Bullet(
                           icon: Icons.wb_sunny_outlined,
                           text:
                               'Keep your face in the outline, in good light. Glasses off if you can.',
+                          muted: muted,
                         ),
                         const SizedBox(height: 28),
                         if (showStartButton)
@@ -101,10 +108,15 @@ Future<bool?> showScanOnboardingSheet(
 }
 
 class _Bullet extends StatelessWidget {
-  const _Bullet({required this.icon, required this.text});
+  const _Bullet({
+    required this.icon,
+    required this.text,
+    required this.muted,
+  });
 
   final IconData icon;
   final String text;
+  final Color muted;
 
   @override
   Widget build(BuildContext context) {
@@ -118,8 +130,8 @@ class _Bullet extends StatelessWidget {
           Expanded(
             child: Text(
               text,
-              style: const TextStyle(
-                color: ScanTheme.textSecondary,
+              style: TextStyle(
+                color: muted,
                 fontSize: 15,
                 height: 1.35,
               ),
