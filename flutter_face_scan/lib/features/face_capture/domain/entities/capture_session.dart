@@ -1,6 +1,7 @@
 import 'package:equatable/equatable.dart';
 
 import 'capture_snapshot.dart';
+import 'expression_mode.dart';
 import 'face_pose.dart';
 import 'still_capture.dart';
 
@@ -12,6 +13,7 @@ final class CaptureSession extends Equatable {
     required this.createdAt,
     required this.snapshots,
     this.stills = const <FacePose, StillCapture>{},
+    this.expression = ExpressionMode.neutral,
   });
 
   /// Stable session identifier (also used as the on-disk folder name).
@@ -26,6 +28,10 @@ final class CaptureSession extends Equatable {
   /// Optional RGB still + its camera projection per pose, for UV texture baking.
   final Map<FacePose, StillCapture> stills;
 
+  /// Facial expression held during this run (persisted in the manifest).
+  final ExpressionMode expression;
+
   @override
-  List<Object?> get props => <Object?>[id, createdAt, snapshots, stills];
+  List<Object?> get props =>
+      <Object?>[id, createdAt, snapshots, stills, expression];
 }

@@ -12,6 +12,8 @@ enum PoseGuidance {
   lookUp,
   lookDown,
   levelHead,
+  /// Expression gate: smile coefficients below threshold.
+  smileMore,
   holdSteady,
   onTarget,
 }

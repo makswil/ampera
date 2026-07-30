@@ -16,9 +16,11 @@ import '../data/file_snapshot_repository.dart';
 import '../data/session_folder_loader.dart';
 import '../domain/constants/face_vertex_indices.dart';
 import '../domain/entities/capture_session.dart';
+import '../domain/entities/expression_mode.dart';
 import '../domain/entities/face_pose.dart';
 import '../domain/entities/saved_session.dart';
 import '../domain/entities/still_capture.dart';
+import '../domain/logic/expression_aware_pose_validator.dart';
 import '../domain/logic/guided_pose_validator.dart';
 import '../domain/logic/least_squares_symmetry_axis_extractor.dart';
 import '../domain/services/symmetry_axis_extractor.dart';
@@ -46,8 +48,12 @@ class CapturePage extends StatefulWidget {
 class _CapturePageState extends State<CapturePage> {
   late final ArkitFaceTrackingService _trackingService;
   late final CaptureBloc _bloc;
-  late final GuidedPoseValidator _poseValidator;
+  late final GuidedPoseValidator _guidedValidator;
+  late final ExpressionAwarePoseValidator _poseValidator;
   final DebugSettings _debug = DebugSettings();
+
+  /// Expression chosen in the idle picker; applied on the next Start.
+  ExpressionMode _selectedExpression = ExpressionMode.neutral;
 
   bool _saving = false;
   /// True after the current capture run was written to disk (one-shot).
@@ -134,7 +140,8 @@ class _CapturePageState extends State<CapturePage> {
     super.initState();
     _trackingService = ArkitFaceTrackingService();
     const SymmetryAxisExtractor extractor = LeastSquaresSymmetryAxisExtractor();
-    _poseValidator = GuidedPoseValidator(axisExtractor: extractor);
+    _guidedValidator = GuidedPoseValidator(axisExtractor: extractor);
+    _poseValidator = ExpressionAwarePoseValidator(inner: _guidedValidator);
     _syncDistanceTolerance();
     // Don't auto-start: the user starts each scan from the Start button so the
     // preview + guidance don't run until asked.
@@ -182,7 +189,7 @@ class _CapturePageState extends State<CapturePage> {
 
   /// Pushes the debug slider's target distance into the live pose validator.
   void _syncDistanceTolerance() {
-    _poseValidator.tolerance = PoseTolerance(
+    _guidedValidator.tolerance = PoseTolerance(
       targetDistanceMeters: _debug.targetDistanceMeters,
     );
   }
@@ -215,6 +222,9 @@ class _CapturePageState extends State<CapturePage> {
     if (!mounted) {
       return;
     }
+    final CaptureStarted start = CaptureStarted(
+      expressionMode: _selectedExpression,
+    );
     if (!seen) {
       await _trackingService.dismissPresented();
       if (!mounted) {
@@ -224,7 +234,7 @@ class _CapturePageState extends State<CapturePage> {
         context,
         onStart: () {
           unawaited(OnboardingStore.markSeen());
-          _bloc.add(const CaptureStarted());
+          _bloc.add(start);
         },
       );
       if (started != true) {
@@ -234,7 +244,7 @@ class _CapturePageState extends State<CapturePage> {
       }
       return;
     }
-    _bloc.add(const CaptureStarted());
+    _bloc.add(start);
   }
 
   void _showHowToScan() {
@@ -498,6 +508,7 @@ class _CapturePageState extends State<CapturePage> {
         createdAt: DateTime.now(),
         snapshots: state.snapshots,
         stills: Map<FacePose, StillCapture>.of(_stills),
+        expression: state.expressionMode,
       );
       final SavedSession saved = await repository.save(session);
       _lastSession = session;
@@ -637,6 +648,7 @@ class _CapturePageState extends State<CapturePage> {
         createdAt: session.createdAt,
         snapshots: session.snapshots,
         stills: stills,
+        expression: session.expression,
       ),
       note: 'ml-wb OK → ${result.targetKelvin.round()} K ($mode)$timing',
     );
@@ -790,6 +802,10 @@ class _CapturePageState extends State<CapturePage> {
                   captureBanner: _captureBanner,
                   deferPoseGuidance: _awaitingStill,
                   statusLine: _consumerStatusLine(),
+                  selectedExpression: _selectedExpression,
+                  onExpressionChanged: (ExpressionMode mode) {
+                    setState(() => _selectedExpression = mode);
+                  },
                 ),
               ),
               // Calibration HUD — visibility is a runtime debug toggle.

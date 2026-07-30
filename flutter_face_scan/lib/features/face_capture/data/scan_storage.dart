@@ -1,4 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
+
+import '../domain/entities/expression_mode.dart';
 
 /// One persisted scan session on disk.
 final class ScanEntry {
@@ -7,6 +10,7 @@ final class ScanEntry {
     required this.path,
     required this.modified,
     required this.sizeBytes,
+    this.expression = ExpressionMode.neutral,
   });
 
   /// Folder name (matches [CaptureSession.id]).
@@ -20,6 +24,9 @@ final class ScanEntry {
 
   /// Total size of the folder's files, in bytes.
   final int sizeBytes;
+
+  /// Expression from `manifest.json` (defaults to neutral for legacy sessions).
+  final ExpressionMode expression;
 }
 
 /// Lists and deletes saved scan sessions under `<root>/face_scans/`.
@@ -50,6 +57,7 @@ final class ScanStorage {
             path: entity.path,
             modified: stat.modified,
             sizeBytes: await _directorySize(entity),
+            expression: await _readExpression(entity),
           ),
         );
       }
@@ -71,6 +79,22 @@ final class ScanStorage {
     if (_scansDir.existsSync()) {
       await _scansDir.delete(recursive: true);
     }
+  }
+
+  Future<ExpressionMode> _readExpression(Directory dir) async {
+    final File manifest = File('${dir.path}/manifest.json');
+    if (!manifest.existsSync()) {
+      return ExpressionMode.neutral;
+    }
+    try {
+      final Object? decoded = jsonDecode(await manifest.readAsString());
+      if (decoded is Map<String, dynamic>) {
+        return ExpressionMode.fromName(decoded['expression'] as String?);
+      }
+    } on Object {
+      // Corrupt / unreadable → treat as neutral.
+    }
+    return ExpressionMode.neutral;
   }
 
   Future<int> _directorySize(Directory dir) async {

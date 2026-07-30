@@ -6,6 +6,7 @@ import 'package:flutter_face_scan/features/face_capture/data/file_snapshot_repos
 import 'package:flutter_face_scan/features/face_capture/domain/entities/capture_session.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/capture_snapshot.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/euler_angles.dart';
+import 'package:flutter_face_scan/features/face_capture/domain/entities/expression_mode.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/face_pose.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/saved_session.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/still_capture.dart';
@@ -62,6 +63,8 @@ void main() {
         jsonDecode(await File(saved.manifestPath).readAsString())
             as Map<String, dynamic>;
     expect(manifest['id'], 'session_test');
+    expect(manifest['schemaVersion'], 3);
+    expect(manifest['expression'], 'neutral');
     final List<dynamic> poses = manifest['poses'] as List<dynamic>;
     expect(poses.length, 3);
     expect((poses.first as Map<String, dynamic>)['pose'], 'frontal');
@@ -165,5 +168,25 @@ void main() {
     expect((still['viewMatrix'] as List<dynamic>).length, 16);
     expect((still['projectionMatrix'] as List<dynamic>).length, 16);
     expect((still['faceTransform'] as List<dynamic>).length, 16);
+  });
+
+  test('persists expression mode in the manifest', () async {
+    final FileSnapshotRepository repository = FileSnapshotRepository(
+      rootDirectory: tempDir,
+    );
+    final SavedSession saved = await repository.save(
+      CaptureSession(
+        id: 'session_smile',
+        createdAt: DateTime(2026, 1, 1),
+        snapshots: <CaptureSnapshot>[snapshotFor(FacePose.frontal)],
+        expression: ExpressionMode.smile,
+      ),
+    );
+
+    final Map<String, dynamic> manifest =
+        jsonDecode(await File(saved.manifestPath).readAsString())
+            as Map<String, dynamic>;
+    expect(manifest['expression'], 'smile');
+    expect(manifest['schemaVersion'], 3);
   });
 }

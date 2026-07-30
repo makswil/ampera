@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_face_scan/features/face_capture/data/scan_storage.dart';
+import 'package:flutter_face_scan/features/face_capture/domain/entities/expression_mode.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -15,11 +16,19 @@ void main() {
     }
   });
 
-  Future<void> makeSession(String id, {int bytes = 10}) async {
+  Future<void> makeSession(
+    String id, {
+    int bytes = 10,
+    String? expression,
+  }) async {
     final Directory dir = Directory('${tempDir.path}/face_scans/$id');
     await dir.create(recursive: true);
     await File('${dir.path}/frontal.ply').writeAsString('x' * bytes);
-    await File('${dir.path}/manifest.json').writeAsString('{}');
+    final String expressionField =
+        expression == null ? '' : ',\n  "expression": "$expression"';
+    await File('${dir.path}/manifest.json').writeAsString(
+      '{\n  "id": "$id"$expressionField\n}',
+    );
   }
 
   test('lists nothing when no scans exist', () async {
@@ -39,6 +48,19 @@ void main() {
       'session_b',
     ]));
     expect(entries.every((ScanEntry e) => e.sizeBytes > 0), isTrue);
+    expect(
+      entries.every((ScanEntry e) => e.expression == ExpressionMode.neutral),
+      isTrue,
+    );
+  });
+
+  test('reads expression from the manifest', () async {
+    await makeSession('session_smile', expression: 'smile');
+
+    final ScanStorage storage = ScanStorage(rootDirectory: tempDir);
+    final List<ScanEntry> entries = await storage.list();
+
+    expect(entries.single.expression, ExpressionMode.smile);
   });
 
   test('deletes a single session', () async {

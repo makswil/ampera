@@ -1,5 +1,6 @@
 import 'package:equatable/equatable.dart';
 
+import '../domain/entities/expression_mode.dart';
 import '../domain/entities/face_observation.dart';
 
 /// Events driving the [CaptureBloc] state machine.
@@ -12,7 +13,13 @@ sealed class CaptureEvent extends Equatable {
 
 /// User starts (or restarts) the guided capture; subscribes to the tracker.
 final class CaptureStarted extends CaptureEvent {
-  const CaptureStarted();
+  const CaptureStarted({this.expressionMode = ExpressionMode.neutral});
+
+  /// Facial expression to gate during this run.
+  final ExpressionMode expressionMode;
+
+  @override
+  List<Object?> get props => <Object?>[expressionMode];
 }
 
 /// User aborts / leaves; tears down the AR session.

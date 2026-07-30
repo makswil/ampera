@@ -63,7 +63,8 @@ final class FileSnapshotRepository implements SnapshotRepository {
     final Map<String, Object?> manifest = <String, Object?>{
       'id': session.id,
       'createdAt': session.createdAt.toIso8601String(),
-      'schemaVersion': 2,
+      'schemaVersion': 3,
+      'expression': session.expression.name,
       // Per-vertex UVs (constant across poses) — the bake output layout.
       'textureCoordinates': _textureCoordinates(session),
       'poses': poseEntries,

@@ -7,6 +7,7 @@ import 'package:vector_math/vector_math_64.dart';
 import '../domain/entities/capture_session.dart';
 import '../domain/entities/capture_snapshot.dart';
 import '../domain/entities/euler_angles.dart';
+import '../domain/entities/expression_mode.dart';
 import '../domain/entities/face_blendshape.dart';
 import '../domain/entities/face_observation.dart';
 import '../domain/entities/face_pose.dart';
@@ -174,6 +175,9 @@ final class SessionFolderLoader {
         createdAt: createdAt,
         snapshots: snapshots,
         stills: stills,
+        expression: ExpressionMode.fromName(
+          manifest['expression'] as String?,
+        ),
       );
       final SavedSession saved = SavedSession(
         id: id,

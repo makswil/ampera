@@ -50,11 +50,13 @@ Status legend: `[x]` done · `[~]` in progress / partial · `[ ]` todo
 
 ## Phase 3 — V2 Dynamic (expression) capture
 
-- [ ] Implement `BlendshapeSnapshotSeriesStrategy` (recommended over video)
-- [ ] `BlendshapeTarget` thresholds (jawOpen, smile, browInnerUp, cheekPuff…)
-- [ ] Extend BLoC: dynamic-capture phase after the static poses
-- [ ] Guidance copy for expression prompts
-- [ ] Unit tests for blendshape triggering + completion
+- [x] Expression mode picker reuses the V1 guided scan (no second pipeline)
+- [x] `ExpressionAwarePoseValidator` decorator + Smile blendshape gate
+- [x] Manifest `expression` + schemaVersion 3 (legacy → neutral)
+- [x] Guidance copy + scan-list label
+- [x] Unit tests for gate, bloc mode, manifest/list
+- [ ] (Optional) more modes beyond smile (jawOpen, browsUp, …)
+- [ ] (Optional) shorten non-neutral pose set to frontal if side-smile UX fails
 - [ ] (Optional) evaluate short video sequences if dynamics prove necessary
 
 ## Phase 4 — V3 3D reconstruction

@@ -7,6 +7,8 @@ enum FaceBlendshape {
   jawOpen('jawOpen'),
   mouthSmileLeft('mouthSmileLeft'),
   mouthSmileRight('mouthSmileRight'),
+  mouthStretchLeft('mouthStretchLeft'),
+  mouthStretchRight('mouthStretchRight'),
   mouthPucker('mouthPucker'),
   browInnerUp('browInnerUp'),
   browDownLeft('browDownLeft'),
@@ -14,6 +16,8 @@ enum FaceBlendshape {
   eyeBlinkLeft('eyeBlinkLeft'),
   eyeBlinkRight('eyeBlinkRight'),
   cheekPuff('cheekPuff'),
+  cheekSquintLeft('cheekSquintLeft'),
+  cheekSquintRight('cheekSquintRight'),
   noseSneerLeft('noseSneerLeft'),
   noseSneerRight('noseSneerRight');
 

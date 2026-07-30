@@ -777,9 +777,39 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     }
 
     var blendShapes = [String: Double]()
+    // Always emit the expression keys we gate on (even at 0). ARKit may omit
+    // near-zero coefficients from `faceAnchor.blendShapes`, which made the
+    // smile gate see an empty map and reject a real smile.
+    let tracked: [ARFaceAnchor.BlendShapeLocation] = [
+      .jawOpen,
+      .mouthSmileLeft, .mouthSmileRight,
+      .mouthStretchLeft, .mouthStretchRight,
+      .mouthPucker,
+      .browInnerUp, .browDownLeft, .browDownRight,
+      .eyeBlinkLeft, .eyeBlinkRight,
+      .cheekPuff, .cheekSquintLeft, .cheekSquintRight,
+      .noseSneerLeft, .noseSneerRight,
+    ]
+    for location in tracked {
+      blendShapes[location.rawValue] =
+        faceAnchor.blendShapes[location]?.doubleValue ?? 0
+    }
     for (location, value) in faceAnchor.blendShapes {
       blendShapes[location.rawValue] = value.doubleValue
     }
+
+    // Parallel typed-array path for expression gates. Nested `[String:Double]`
+    // maps have been unreliable on the EventChannel next to large vertex
+    // buffers; Float32List matches the vertices codec and is decoded first.
+    // Order: smileL, smileR, stretchL, stretchR, squintL, squintR.
+    let expressionCoeffs: [Float] = [
+      Float(faceAnchor.blendShapes[.mouthSmileLeft]?.doubleValue ?? 0),
+      Float(faceAnchor.blendShapes[.mouthSmileRight]?.doubleValue ?? 0),
+      Float(faceAnchor.blendShapes[.mouthStretchLeft]?.doubleValue ?? 0),
+      Float(faceAnchor.blendShapes[.mouthStretchRight]?.doubleValue ?? 0),
+      Float(faceAnchor.blendShapes[.cheekSquintLeft]?.doubleValue ?? 0),
+      Float(faceAnchor.blendShapes[.cheekSquintRight]?.doubleValue ?? 0),
+    ]
 
     var result: [String: Any] = [
       "timestampMicros": Int(Date().timeIntervalSince1970 * 1_000_000),
@@ -787,6 +817,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       "transform": float32Data(flatten(faceAnchor.transform)),
       "vertices": float32Data(vertices),
       "blendShapes": blendShapes,
+      "expressionCoeffs": float32Data(expressionCoeffs),
     ]
 
     // Camera transform (for camera-relative Euler) + the symmetry-axis vertices

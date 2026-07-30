@@ -18,6 +18,7 @@ final class PoseValidation extends Equatable {
     this.screenStraightness = double.nan,
     this.screenCenterOffset = double.nan,
     this.distanceMeters = double.nan,
+    this.expressionScore = double.nan,
   });
 
   /// A "face lost" result with no measurements.
@@ -32,7 +33,8 @@ final class PoseValidation extends Equatable {
       screenAxisTilt = double.nan,
       screenStraightness = double.nan,
       screenCenterOffset = double.nan,
-      distanceMeters = double.nan;
+      distanceMeters = double.nan,
+      expressionScore = double.nan;
 
   /// True when every constraint (orientation + symmetry axis) is satisfied.
   final bool isOnTarget;
@@ -67,6 +69,9 @@ final class PoseValidation extends Equatable {
   /// Camera-to-face distance in metres; NaN if N/A.
   final double distanceMeters;
 
+  /// Live expression score (0–1) when an expression gate ran; NaN otherwise.
+  final double expressionScore;
+
   @override
   List<Object?> get props => <Object?>[
     isOnTarget,
@@ -80,5 +85,6 @@ final class PoseValidation extends Equatable {
     screenStraightness,
     screenCenterOffset,
     distanceMeters,
+    expressionScore,
   ];
 }

@@ -1,6 +1,7 @@
 import 'package:equatable/equatable.dart';
 
 import '../domain/entities/capture_snapshot.dart';
+import '../domain/entities/expression_mode.dart';
 import '../domain/entities/face_pose.dart';
 import '../domain/entities/pose_validation.dart';
 import 'capture_status.dart';
@@ -19,6 +20,7 @@ final class CaptureState extends Equatable {
     required this.lastValidation,
     required this.holdProgress,
     required this.errorMessage,
+    this.expressionMode = ExpressionMode.neutral,
   });
 
   /// Initial, pre-start state.
@@ -29,7 +31,8 @@ final class CaptureState extends Equatable {
       snapshots = const <CaptureSnapshot>[],
       lastValidation = null,
       holdProgress = 0,
-      errorMessage = null;
+      errorMessage = null,
+      expressionMode = ExpressionMode.neutral;
 
   final CaptureStatus status;
 
@@ -51,6 +54,9 @@ final class CaptureState extends Equatable {
   /// Populated only when [status] is [CaptureStatus.error].
   final String? errorMessage;
 
+  /// Expression selected for this run (also persisted on the session).
+  final ExpressionMode expressionMode;
+
   /// Overall session progress (captured poses / total poses).
   double get sessionProgress =>
       completedPoses.length / FacePose.captureSequence.length;
@@ -65,6 +71,7 @@ final class CaptureState extends Equatable {
     double? holdProgress,
     String? errorMessage,
     bool clearError = false,
+    ExpressionMode? expressionMode,
   }) {
     return CaptureState(
       status: status ?? this.status,
@@ -74,6 +81,7 @@ final class CaptureState extends Equatable {
       lastValidation: lastValidation ?? this.lastValidation,
       holdProgress: holdProgress ?? this.holdProgress,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
+      expressionMode: expressionMode ?? this.expressionMode,
     );
   }
 
@@ -86,5 +94,6 @@ final class CaptureState extends Equatable {
     lastValidation,
     holdProgress,
     errorMessage,
+    expressionMode,
   ];
 }

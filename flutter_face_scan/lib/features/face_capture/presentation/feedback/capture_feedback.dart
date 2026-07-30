@@ -58,7 +58,8 @@ GuidanceVisual visualFor(PoseGuidance? guidance) {
     PoseGuidance.turnRight ||
     PoseGuidance.lookUp ||
     PoseGuidance.lookDown ||
-    PoseGuidance.levelHead =>
+    PoseGuidance.levelHead ||
+    PoseGuidance.smileMore =>
       GuidanceVisual.none,
   };
 }

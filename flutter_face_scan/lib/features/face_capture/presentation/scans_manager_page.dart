@@ -100,7 +100,9 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
                 return ListTile(
                   title: Text(entry.id),
                   subtitle: Text(
-                    '${_formatSize(entry.sizeBytes)} · ${_formatDate(entry.modified)}',
+                    '${entry.expression.label} · '
+                    '${_formatSize(entry.sizeBytes)} · '
+                    '${_formatDate(entry.modified)}',
                   ),
                   trailing: IconButton(
                     tooltip: 'Delete',

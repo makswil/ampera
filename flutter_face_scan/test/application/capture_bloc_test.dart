@@ -4,6 +4,7 @@ import 'package:flutter_face_scan/features/face_capture/application/capture_bloc
 import 'package:flutter_face_scan/features/face_capture/application/capture_event.dart';
 import 'package:flutter_face_scan/features/face_capture/application/capture_status.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/euler_angles.dart';
+import 'package:flutter_face_scan/features/face_capture/domain/entities/expression_mode.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/face_observation.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/face_pose.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/pose_guidance.dart';
@@ -172,6 +173,16 @@ void main() {
     expect(bloc.state.status, CaptureStatus.error);
     expect(bloc.state.errorMessage, 'sensor lost');
     expect(service.stopped, isTrue);
+    await bloc.close();
+  });
+
+  test('stores the expression mode from CaptureStarted', () async {
+    final CaptureBloc bloc = buildBloc(_ScriptedValidator(true));
+
+    bloc.add(const CaptureStarted(expressionMode: ExpressionMode.smile));
+    await _settle();
+
+    expect(bloc.state.expressionMode, ExpressionMode.smile);
     await bloc.close();
   });
 }

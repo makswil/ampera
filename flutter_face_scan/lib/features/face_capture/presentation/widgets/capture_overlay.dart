@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../application/capture_state.dart';
 import '../../application/capture_status.dart';
+import '../../domain/entities/expression_mode.dart';
 import '../../domain/entities/face_pose.dart';
 import '../../domain/entities/pose_guidance.dart';
 import '../../domain/value_objects/pose_tolerance.dart';
@@ -22,6 +23,8 @@ class CaptureOverlay extends StatelessWidget {
     this.captureBanner,
     this.targetDistanceMeters = PoseTolerance.kDefaultTargetDistanceMeters,
     this.deferPoseGuidance = false,
+    this.selectedExpression = ExpressionMode.neutral,
+    this.onExpressionChanged,
     super.key,
   });
 
@@ -35,6 +38,12 @@ class CaptureOverlay extends StatelessWidget {
 
   /// Hold pose/completed UI while a still handoff (TrueDepth pause) is in flight.
   final bool deferPoseGuidance;
+
+  /// Idle-mode picker selection (applied on the next Start).
+  final ExpressionMode selectedExpression;
+
+  /// Called when the user picks a different expression before Start.
+  final ValueChanged<ExpressionMode>? onExpressionChanged;
 
   static PoseGuidance? primaryGuidance(CaptureState state) {
     final List<PoseGuidance>? guidance = state.lastValidation?.guidance;
@@ -115,6 +124,7 @@ class CaptureOverlay extends StatelessWidget {
                       holding: holding,
                       deferPoseGuidance: deferPoseGuidance,
                       statusLine: inCaptureChrome ? null : statusLine,
+                      selectedExpression: selectedExpression,
                     ),
                   ),
                   if (!inCaptureChrome)
@@ -127,6 +137,8 @@ class CaptureOverlay extends StatelessWidget {
                         onStart: onStart,
                         onRetake: onRetake,
                         onOpenSettings: onOpenSettings,
+                        selectedExpression: selectedExpression,
+                        onExpressionChanged: onExpressionChanged,
                       ),
                     ),
                 ],
@@ -145,12 +157,14 @@ class _LiveGuidance extends StatelessWidget {
     required this.holding,
     this.deferPoseGuidance = false,
     this.statusLine,
+    this.selectedExpression = ExpressionMode.neutral,
   });
 
   final CaptureState state;
   final bool holding;
   final bool deferPoseGuidance;
   final String? statusLine;
+  final ExpressionMode selectedExpression;
 
   bool get _useCameraCorners =>
       !deferPoseGuidance &&
@@ -234,7 +248,10 @@ class _LiveGuidance extends StatelessWidget {
   (String?, String?) _copy() {
     switch (state.status) {
       case CaptureStatus.idle:
-        return (PoseGuidanceCopy.idleReady, PoseGuidanceCopy.idleHeadline);
+        return (
+          PoseGuidanceCopy.idleReady,
+          PoseGuidanceCopy.idleHeadline(selectedExpression),
+        );
       case CaptureStatus.completed:
         // Bloc reaches completed before the last still finishes; keep calm copy
         // until deferPoseGuidance clears (freeze / handoff done).
@@ -262,14 +279,26 @@ class _LiveGuidance extends StatelessWidget {
         }
 
         if (primary != null) {
-          return (PoseGuidanceCopy.hint(primary), null);
+          return (
+            PoseGuidanceCopy.hint(
+              primary,
+              expressionScore: state.lastValidation?.expressionScore ?? double.nan,
+            ),
+            null,
+          );
         }
 
         final FacePose? pose = state.currentPose;
         if (pose == null) {
           return (null, null);
         }
-        return (PoseGuidanceCopy.poseInstruction(pose), null);
+        return (
+          PoseGuidanceCopy.poseInstruction(
+            pose,
+            expression: state.expressionMode,
+          ),
+          null,
+        );
     }
   }
 
@@ -344,12 +373,16 @@ class _BottomActions extends StatelessWidget {
     this.onStart,
     this.onRetake,
     this.onOpenSettings,
+    this.selectedExpression = ExpressionMode.neutral,
+    this.onExpressionChanged,
   });
 
   final CaptureState state;
   final VoidCallback? onStart;
   final VoidCallback? onRetake;
   final VoidCallback? onOpenSettings;
+  final ExpressionMode selectedExpression;
+  final ValueChanged<ExpressionMode>? onExpressionChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -399,33 +432,136 @@ class _BottomActions extends StatelessWidget {
           ),
         ],
         if (showStart)
-          Semantics(
-            button: true,
-            label: 'Start face scan',
-            child: SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                style: ScanTheme.primaryButton,
-                onPressed: onStart,
-                child: const Text('Start'),
-              ),
-            ),
+          _StartRow(
+            label: 'Start · ${selectedExpression.label}',
+            semanticsLabel: 'Start ${selectedExpression.label} face scan',
+            onStart: onStart!,
+            expression: selectedExpression,
+            onExpressionChanged: onExpressionChanged,
           ),
         if (showRetake)
-          Semantics(
-            button: true,
-            label: 'Scan again',
-            child: SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                style: ScanTheme.primaryButton,
-                onPressed: onRetake,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Scan again'),
-              ),
-            ),
+          _StartRow(
+            label: 'Scan again · ${selectedExpression.label}',
+            semanticsLabel: 'Scan again ${selectedExpression.label}',
+            onStart: onRetake!,
+            expression: selectedExpression,
+            onExpressionChanged: onExpressionChanged,
+            icon: Icons.refresh,
           ),
       ],
+    );
+  }
+}
+
+/// Primary action + separate square expression toggle.
+///
+/// Start is intentionally not full-width (toggle sits beside it). The label is
+/// optically shifted so it stays centred on the full row / screen, not on the
+/// shorter button alone.
+class _StartRow extends StatelessWidget {
+  const _StartRow({
+    required this.label,
+    required this.semanticsLabel,
+    required this.onStart,
+    required this.expression,
+    this.onExpressionChanged,
+    this.icon,
+  });
+
+  final String label;
+  final String semanticsLabel;
+  final VoidCallback onStart;
+  final ExpressionMode expression;
+  final ValueChanged<ExpressionMode>? onExpressionChanged;
+  final IconData? icon;
+
+  static const double _toggleWidth = 52;
+  static const double _gap = 8;
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget labelChild = icon == null
+        ? Text(label)
+        : Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(icon, size: 20),
+              const SizedBox(width: 8),
+              Text(label),
+            ],
+          );
+
+    if (onExpressionChanged == null) {
+      return Semantics(
+        button: true,
+        label: semanticsLabel,
+        child: SizedBox(
+          width: double.infinity,
+          child: FilledButton(
+            style: ScanTheme.primaryButton,
+            onPressed: onStart,
+            child: labelChild,
+          ),
+        ),
+      );
+    }
+
+    // Shift label right by half the trailing chrome so it centres on the row.
+    const double labelShift = (_toggleWidth + _gap) / 2;
+
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double buttonWidth =
+            constraints.maxWidth - _toggleWidth - _gap;
+        return Row(
+          children: <Widget>[
+            SizedBox(
+              width: buttonWidth,
+              child: Semantics(
+                button: true,
+                label: semanticsLabel,
+                child: FilledButton(
+                  style: ScanTheme.primaryButton,
+                  onPressed: onStart,
+                  child: Transform.translate(
+                    offset: const Offset(labelShift, 0),
+                    child: labelChild,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: _gap),
+            Semantics(
+              button: true,
+              label: 'Expression ${expression.label}, tap to switch',
+              child: SizedBox(
+                width: _toggleWidth,
+                height: 48,
+                child: OutlinedButton(
+                  onPressed: () => onExpressionChanged!(expression.next),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    padding: EdgeInsets.zero,
+                    side: BorderSide(
+                      color: Colors.white.withValues(alpha: 0.35),
+                    ),
+                    shape: const RoundedRectangleBorder(
+                      borderRadius: BorderRadius.zero,
+                    ),
+                  ),
+                  child: Icon(
+                    expression == ExpressionMode.smile
+                        ? Icons.sentiment_satisfied_alt
+                        : Icons.sentiment_neutral,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

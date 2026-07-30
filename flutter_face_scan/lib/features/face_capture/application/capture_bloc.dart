@@ -7,6 +7,7 @@ import '../domain/entities/capture_snapshot.dart';
 import '../domain/entities/face_observation.dart';
 import '../domain/entities/face_pose.dart';
 import '../domain/entities/pose_validation.dart';
+import '../domain/logic/expression_aware_pose_validator.dart';
 import '../domain/services/face_tracking_service.dart';
 import '../domain/services/pose_validator.dart';
 import '../domain/value_objects/pose_tolerance.dart';
@@ -66,15 +67,21 @@ final class CaptureBloc extends Bloc<CaptureEvent, CaptureState> {
     Emitter<CaptureState> emit,
   ) async {
     _resetHold();
+    // Keep expression mode on the decorator in sync when the page wired one.
+    final PoseValidator validator = _poseValidator;
+    if (validator is ExpressionAwarePoseValidator) {
+      validator.mode = event.expressionMode;
+    }
     emit(
-      const CaptureState(
+      CaptureState(
         status: CaptureStatus.capturing,
         currentPose: FacePose.frontal,
-        completedPoses: <FacePose>[],
-        snapshots: <CaptureSnapshot>[],
+        completedPoses: const <FacePose>[],
+        snapshots: const <CaptureSnapshot>[],
         lastValidation: null,
         holdProgress: 0,
         errorMessage: null,
+        expressionMode: event.expressionMode,
       ),
     );
 

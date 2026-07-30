@@ -348,13 +348,38 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
         timestamp: timestamp,
         transform: _decodeTransform(payload['transform']) ?? Matrix4.identity(),
         rawVertices: _decodeRawVertices(payload['vertices']),
-        blendShapes: _decodeBlendShapes(payload['blendShapes']),
+        blendShapes: _mergeExpressionCoeffs(
+          _decodeBlendShapes(payload['blendShapes']),
+          payload['expressionCoeffs'],
+        ),
         cameraTransform: _decodeTransform(payload['cameraTransform']),
         axisScreenPoints: _decodeScreenPoints(payload['axisScreenPoints']),
         triangleIndices: _triangleIndices,
         textureCoordinates: _textureCoordinates,
       ),
     );
+  }
+
+  /// Prefer the typed `expressionCoeffs` buffer (reliable EventChannel path)
+  /// over the nested blendShapes map when both are present.
+  ///
+  /// Order matches native: smileL, smileR, stretchL, stretchR, squintL, squintR.
+  Map<String, double> _mergeExpressionCoeffs(
+    Map<String, double> fromMap,
+    Object? coeffsRaw,
+  ) {
+    final List<double> coeffs = _asDoubleList(coeffsRaw);
+    if (coeffs.length < 6) {
+      return fromMap;
+    }
+    final Map<String, double> merged = Map<String, double>.of(fromMap);
+    merged['mouthSmileLeft'] = coeffs[0];
+    merged['mouthSmileRight'] = coeffs[1];
+    merged['mouthStretchLeft'] = coeffs[2];
+    merged['mouthStretchRight'] = coeffs[3];
+    merged['cheekSquintLeft'] = coeffs[4];
+    merged['cheekSquintRight'] = coeffs[5];
+    return merged;
   }
 
   /// Column-major 4×4 matrix as 16 floats (matches simd_float4x4 layout).
@@ -415,6 +440,9 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
   }
 
   List<double> _asDoubleList(Object? raw) {
+    if (raw is Float32List) {
+      return raw;
+    }
     if (raw is List) {
       return <double>[
         for (final Object? v in raw)
