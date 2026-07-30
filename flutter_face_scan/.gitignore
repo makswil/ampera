@@ -66,5 +66,8 @@ ios/Runner/GeneratedPluginRegistrant.*
 tool/.venv-mlwb/
 **/.mlwb_cache/
 
+# Local full-session dumps for bake QA (jpg/ply/obj) — keep frontal.ply.
+tool/reference/session_*/
+
 # Uncomment to exclude tests from this repo:
 #/test/
