@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:bloc/bloc.dart';
+import 'package:flutter/services.dart';
 
 import '../domain/entities/capture_snapshot.dart';
 import '../domain/entities/face_observation.dart';
@@ -82,10 +83,20 @@ final class CaptureBloc extends Bloc<CaptureEvent, CaptureState> {
       await _subscription?.cancel();
       _subscription = _trackingService.observations.listen(
         (FaceObservation observation) => add(CaptureFrameReceived(observation)),
-        onError: (Object error) => add(CaptureFailed(error.toString())),
+        onError: (Object error) {
+          if (error is PlatformException) {
+            add(CaptureFailed('${error.code}: ${error.message ?? error.code}'));
+          } else {
+            add(CaptureFailed(error.toString()));
+          }
+        },
       );
     } on Object catch (error) {
-      add(CaptureFailed(error.toString()));
+      if (error is PlatformException) {
+        add(CaptureFailed('${error.code}: ${error.message ?? error.code}'));
+      } else {
+        add(CaptureFailed(error.toString()));
+      }
     }
   }
 

@@ -83,7 +83,20 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     _running = true;
     _frameSubscription ??= _frames.receiveBroadcastStream().listen(
           _onFrame,
-          onError: _controller.addError,
+          onError: (Object error, StackTrace stackTrace) {
+            if (error is PlatformException) {
+              _controller.addError(
+                PlatformException(
+                  code: error.code,
+                  message: error.message,
+                  details: error.details,
+                ),
+                stackTrace,
+              );
+            } else {
+              _controller.addError(error, stackTrace);
+            }
+          },
         );
     await _control.invokeMethod<void>('start');
   }
@@ -99,16 +112,22 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     await _control.invokeMethod<void>('stop');
   }
 
-  /// Portrait JPEG + its projection for the current frame (see [StillCapture]);
-  /// null if no frame / no tracked face. ARKit-backend capability.
+  /// Portrait JPEG of the live preview (no pause) for the handoff cover.
+  Future<Uint8List?> previewFreeze() async {
+    try {
+      final Object? raw = await _control.invokeMethod<Object?>('previewFreeze');
+      return raw is Uint8List ? raw : null;
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
+  /// Portrait JPEG + projection for the current frame; null if no face.
   ///
-  /// When [hiRes] is true, native pauses ARKit, shoots a full-res AVCapture photo
-  /// (front TrueDepth, ~7 MP) registered with ARKit's view/projection matrices,
-  /// then resumes ARKit. Falls back to the ARKit video-res still on any failure,
-  /// so a pose is never lost. Defaults to the stable ARKit video path.
-  ///
-  /// [lockAeAwb] (hi-res only): after the first settled shot, lock exposure +
-  /// white-balance and reuse for later poses in this scan.
+  /// [hiRes]: pause ARKit, shoot ~7 MP AVCapture photo, resume.
+  /// [lockAeAwb]: reuse exposure/WB from the first hi-res shot.
   Future<StillCapture?> captureStill({
     bool hiRes = false,
     bool lockAeAwb = true,
@@ -158,6 +177,17 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
       await _control.invokeMethod<void>('dismissPresented');
     } on PlatformException {
       // Ignore — best-effort unlock.
+    } on MissingPluginException {
+      // Ignore.
+    }
+  }
+
+  /// Opens the iOS Settings app (camera permission recovery).
+  Future<void> openAppSettings() async {
+    try {
+      await _control.invokeMethod<void>('openAppSettings');
+    } on PlatformException {
+      // Ignore.
     } on MissingPluginException {
       // Ignore.
     }

@@ -3,13 +3,13 @@
 /// Ordering of [FacePose.values] defines the capture sequence.
 enum FacePose {
   /// Looking straight at the camera.
-  frontal(targetYaw: 0, targetPitch: 0, label: 'Frontal'),
+  frontal(targetYaw: 0, targetPitch: 0, label: 'Front'),
 
   /// Head turned ~40° to the user's left (camera sees the right cheek).
-  left40(targetYaw: 35, targetPitch: 0, label: 'Left 40°'),
+  left40(targetYaw: 35, targetPitch: 0, label: 'Left'),
 
   /// Head turned ~40° to the user's right (camera sees the left cheek).
-  right40(targetYaw: -35, targetPitch: 0, label: 'Right 40°'),
+  right40(targetYaw: -35, targetPitch: 0, label: 'Right'),
 
   /// Chin raised (head tilted back) so the camera sees under the nose and chin —
   /// areas that only graze the frontal/side views and otherwise bake distorted.

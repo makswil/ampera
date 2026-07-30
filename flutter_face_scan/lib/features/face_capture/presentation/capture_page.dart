@@ -25,19 +25,18 @@ import '../domain/services/symmetry_axis_extractor.dart';
 import '../domain/value_objects/pose_tolerance.dart';
 import 'debug/capture_debug_hud.dart';
 import 'debug/debug_settings.dart';
+import 'feedback/capture_feedback.dart';
+import 'onboarding_store.dart';
+import 'pose_guidance_copy.dart';
+import 'scan_theme.dart';
 import 'scans_manager_page.dart';
 import 'widgets/capture_overlay.dart';
+import 'widgets/scan_onboarding_sheet.dart';
 
-/// Entry widget for V1 guided capture.
-///
-/// Owns dependency wiring, the native ARKit preview view and the BLoC-driven
-/// [CaptureOverlay]. The preview is intentionally dumb (just renders the native
-/// camera/mesh); all decision logic lives in the BLoC, fed by the tracking
-/// service's frame stream.
+/// Guided capture entry: wires ARKit preview, BLoC, and [CaptureOverlay].
 class CapturePage extends StatefulWidget {
   const CapturePage({super.key});
 
-  /// Native platform-view id for the ARKit face preview (see Swift side).
   static const String previewViewType = 'flutter_face_scan/face_preview';
 
   @override
@@ -59,7 +58,7 @@ class _CapturePageState extends State<CapturePage> {
   CaptureSession? _lastSession;
   Directory? _lastDir;
   bool _baking = false;
-  String? _bakeStatus; // e.g. ml-wb Kelvin / failure (shown under guidance)
+  // Bake timing / ml-wb notes go to console — not the guidance surface.
 
   /// Paths of the last baked model (obj/mtl/png), for the share sheet.
   BakedTexture? _baked;
@@ -68,8 +67,19 @@ class _CapturePageState extends State<CapturePage> {
   final Map<FacePose, StillCapture> _stills = <FacePose, StillCapture>{};
   int _lastCompletedCount = 0;
 
-  /// Serializes the per-pose still grabs so the session can await them all
-  /// (including the final pose's) before persisting.
+  /// Banner after each pose (“Captured N of 4”).
+  String? _captureBanner;
+  Timer? _bannerTimer;
+
+  /// Defers next-pose UI until the still handoff finishes.
+  bool _awaitingStill = false;
+
+  /// Cover over the platform view during TrueDepth handoff.
+  /// Also used on the last pose (status already completed) so “All angles
+  /// captured” only appears after the freeze fades — same real still path.
+  Uint8List? _previewFreeze;
+  bool _freezeOpaque = false;
+
   Future<void> _stillChain = Future<void>.value();
 
   Future<void> _grabStill(FacePose pose) async {
@@ -79,6 +89,37 @@ class _CapturePageState extends State<CapturePage> {
     );
     if (still != null && still.bytes.isNotEmpty) {
       _stills[pose] = still;
+    }
+  }
+
+  Future<void> _capturePoseStill(FacePose pose) async {
+    Uint8List? freeze;
+    if (_debug.hiResPhoto) {
+      freeze = await _trackingService.previewFreeze();
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _awaitingStill = true;
+      _previewFreeze = freeze;
+      _freezeOpaque = freeze != null;
+    });
+    _triggerPoseCapturedFeedback(_bloc.state.completedPoses.length);
+    await _grabStill(pose);
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _freezeOpaque = false;
+      _awaitingStill = false;
+    });
+    if (_previewFreeze != null) {
+      await Future<void>.delayed(const Duration(milliseconds: 340));
+      if (mounted) {
+        setState(() => _previewFreeze = null);
+      }
     }
   }
 
@@ -159,6 +200,7 @@ class _CapturePageState extends State<CapturePage> {
 
   @override
   void dispose() {
+    _bannerTimer?.cancel();
     _debug.removeListener(_onDebugChanged);
     _debug.dispose();
     // Bloc.close() tears down the tracking subscription/session.
@@ -167,9 +209,52 @@ class _CapturePageState extends State<CapturePage> {
     super.dispose();
   }
 
-  void _openScanSettings() {
+  Future<void> _handleStart() async {
+    CaptureFeedback.reset();
+    final bool seen = await OnboardingStore.hasSeen();
+    if (!mounted) {
+      return;
+    }
+    if (!seen) {
+      await _trackingService.dismissPresented();
+      if (!mounted) {
+        return;
+      }
+      final bool? started = await showScanOnboardingSheet(
+        context,
+        onStart: () {
+          unawaited(OnboardingStore.markSeen());
+          _bloc.add(const CaptureStarted());
+        },
+      );
+      if (started != true) {
+        // User dismissed without starting — still mark seen so they aren't
+        // blocked; they can reopen help via the `?` button.
+        unawaited(OnboardingStore.markSeen());
+      }
+      return;
+    }
+    _bloc.add(const CaptureStarted());
+  }
+
+  void _showHowToScan() {
+    unawaited(() async {
+      await _trackingService.dismissPresented();
+      if (!mounted) {
+        return;
+      }
+      await showScanOnboardingSheet(
+        context,
+        onStart: () {},
+        showStartButton: false,
+      );
+    }());
+  }
+
+  /// Settings sheet (distance, scans, dev toggles). Help is the `?` button.
+  void _openSettings() {
     unawaited(_showSettingsSheet(
-      title: 'Scan settings',
+      title: 'Settings',
       buildChildren: () => <Widget>[
         ListTile(
           leading: const Icon(Icons.folder_outlined),
@@ -193,8 +278,8 @@ class _CapturePageState extends State<CapturePage> {
             '${(_debug.targetDistanceMeters * 100).round()} cm',
           ),
           subtitle: const Text(
-            'Closer = more face pixels (sharper). '
-            'Too close → clip / distortion on side poses.',
+            'Closer fills the outline more. '
+            'Too close can clip on side angles.',
           ),
         ),
         Slider(
@@ -205,6 +290,7 @@ class _CapturePageState extends State<CapturePage> {
           label: '${(_debug.targetDistanceMeters * 100).round()} cm',
           onChanged: (double v) => _debug.targetDistanceMeters = v,
         ),
+        const Divider(height: 1),
         SwitchListTile(
           title: const Text('Calibration HUD'),
           value: _debug.showHud,
@@ -421,7 +507,6 @@ class _CapturePageState extends State<CapturePage> {
           _saving = false;
           _didPersistCurrent = true;
           _baked = null;
-          _bakeStatus = null;
         });
       }
       // No auto-bake: user tweaks bake settings first, then taps Bake.
@@ -442,7 +527,6 @@ class _CapturePageState extends State<CapturePage> {
     }
     setState(() {
       _baking = true;
-      _bakeStatus = _debug.mlWb ? 'ml-wb…' : null;
     });
     try {
       String? mlWbNote;
@@ -483,16 +567,14 @@ class _CapturePageState extends State<CapturePage> {
         setState(() {
           _baking = false;
           _baked = baked;
-          _bakeStatus = mlWbNote == null
-              ? timingLine
-              : '$mlWbNote · $timingLine';
         });
       }
     } on Object catch (e) {
+      // ignore: avoid_print
+      print('[face_scan] Bake failed: $e');
       if (mounted) {
         setState(() {
           _baking = false;
-          _bakeStatus = 'Bake failed: $e';
         });
       }
     }
@@ -562,11 +644,34 @@ class _CapturePageState extends State<CapturePage> {
 
   /// Cancels the running scan back to idle and discards the partial captures.
   void _cancelScan() {
+    CaptureFeedback.cancelled();
+    CaptureFeedback.reset();
+    _bannerTimer?.cancel();
     _bloc.add(const CaptureStopped());
     setState(() {
       _stills.clear();
       _stillChain = Future<void>.value();
       _lastCompletedCount = 0;
+      _captureBanner = null;
+      _awaitingStill = false;
+      _previewFreeze = null;
+      _freezeOpaque = false;
+    });
+  }
+
+  void _triggerPoseCapturedFeedback(int capturedCount) {
+    CaptureFeedback.poseCaptured();
+    _bannerTimer?.cancel();
+    setState(() {
+      _captureBanner = PoseGuidanceCopy.capturedProgress(
+        capturedCount,
+        FacePose.captureSequence.length,
+      );
+    });
+    _bannerTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (mounted) {
+        setState(() => _captureBanner = null);
+      }
     });
   }
 
@@ -589,60 +694,102 @@ class _CapturePageState extends State<CapturePage> {
   Widget build(BuildContext context) {
     return BlocProvider<CaptureBloc>.value(
       value: _bloc,
-      child: BlocListener<CaptureBloc, CaptureState>(
-        listenWhen: (CaptureState prev, CaptureState next) =>
-            prev.status != next.status ||
-            prev.completedPoses.length != next.completedPoses.length,
-        listener: (BuildContext context, CaptureState state) {
-          // Grab a still the moment a new pose is captured (head is held still);
-          // chained so _finishSession can await the final one before saving.
-          if (state.completedPoses.length > _lastCompletedCount) {
-            final FacePose pose = state.completedPoses.last;
-            _stillChain = _stillChain.then((_) => _grabStill(pose));
-          }
-          _lastCompletedCount = state.completedPoses.length;
+      child: MultiBlocListener(
+        listeners: <BlocListener<CaptureBloc, CaptureState>>[
+          BlocListener<CaptureBloc, CaptureState>(
+            listenWhen: (CaptureState prev, CaptureState next) =>
+                prev.status != next.status ||
+                prev.completedPoses.length != next.completedPoses.length,
+            listener: (BuildContext context, CaptureState state) {
+              if (state.completedPoses.length > _lastCompletedCount) {
+                final FacePose pose = state.completedPoses.last;
+                // Sync flag before this frame builds — otherwise completed copy
+                // flashes over the freeze on the last pose.
+                setState(() => _awaitingStill = true);
+                _stillChain = _stillChain.then((_) => _capturePoseStill(pose));
+              }
+              _lastCompletedCount = state.completedPoses.length;
 
-          if (state.status == CaptureStatus.completed) {
-            unawaited(_finishSession(state));
-          } else if (state.status == CaptureStatus.capturing &&
-              state.completedPoses.isEmpty &&
-              (_stills.isNotEmpty || _didPersistCurrent)) {
-            // Brand-new session started — clear only in-progress stills. Keep
-            // `_lastSession` so Bake still works on the previous disk session
-            // until this run is saved.
-            setState(() {
-              _stills.clear();
-              _stillChain = Future<void>.value();
-              _lastCompletedCount = 0;
-              _didPersistCurrent = false;
-            });
-          }
-        },
+              if (state.status == CaptureStatus.completed) {
+                CaptureFeedback.scanCompleted();
+                unawaited(_finishSession(state));
+              } else if (state.status == CaptureStatus.capturing &&
+                  state.completedPoses.isEmpty &&
+                  (_stills.isNotEmpty || _didPersistCurrent)) {
+                CaptureFeedback.reset();
+                setState(() {
+                  _stills.clear();
+                  _stillChain = Future<void>.value();
+                  _lastCompletedCount = 0;
+                  _didPersistCurrent = false;
+                  _captureBanner = null;
+                  _awaitingStill = false;
+                  _previewFreeze = null;
+                  _freezeOpaque = false;
+                });
+              } else if (state.status == CaptureStatus.idle) {
+                CaptureFeedback.reset();
+                if (_awaitingStill || _previewFreeze != null) {
+                  setState(() {
+                    _awaitingStill = false;
+                    _previewFreeze = null;
+                    _freezeOpaque = false;
+                  });
+                }
+              }
+            },
+          ),
+          BlocListener<CaptureBloc, CaptureState>(
+            listenWhen: (CaptureState prev, CaptureState next) {
+              final bool prevOn =
+                  prev.lastValidation?.isOnTarget ?? false;
+              final bool nextOn =
+                  next.lastValidation?.isOnTarget ?? false;
+              return prevOn != nextOn || prev.status != next.status;
+            },
+            listener: (BuildContext context, CaptureState state) {
+              if (state.status == CaptureStatus.capturing) {
+                CaptureFeedback.onTargetChanged(
+                  onTarget: state.lastValidation?.isOnTarget ?? false,
+                );
+              }
+            },
+          ),
+        ],
         child: Scaffold(
           backgroundColor: Colors.black,
           body: Stack(
             fit: StackFit.expand,
             children: <Widget>[
               const UiKitView(viewType: CapturePage.previewViewType),
+              if (_previewFreeze != null)
+                IgnorePointer(
+                  child: AnimatedOpacity(
+                    opacity: _freezeOpaque ? 1 : 0,
+                    duration: const Duration(milliseconds: 320),
+                    curve: Curves.easeOut,
+                    child: Image.memory(
+                      _previewFreeze!,
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                      height: double.infinity,
+                      gaplessPlayback: true,
+                      filterQuality: FilterQuality.low,
+                    ),
+                  ),
+                ),
               BlocBuilder<CaptureBloc, CaptureState>(
                 builder: (BuildContext context, CaptureState state) =>
                     CaptureOverlay(
                   state: state,
-                  onStart: () => _bloc.add(const CaptureStarted()),
-                  onBake: () => unawaited(_bakeTexture()),
-                  canBake: _lastSession != null && _lastDir != null,
-                  baking: _baking,
+                  onStart: () => unawaited(_handleStart()),
+                  onRetake: () => unawaited(_handleStart()),
+                  onOpenSettings: () =>
+                      unawaited(_trackingService.openAppSettings()),
                   targetDistanceMeters: _debug.targetDistanceMeters,
-                  statusLine: _saving
-                      ? 'Saving…'
-                      : _baking
-                          ? (_bakeStatus ?? 'Baking texture…')
-                          : _bakeStatus ??
-                              ((_lastSession != null && _baked == null)
-                  ? 'Session ready — adjust 🖌, then Bake'
-                                  : (_baked != null)
-                                      ? 'Baked — Share above, or Bake again'
-                                      : null),
+                  captureBanner: _captureBanner,
+                  deferPoseGuidance: _awaitingStill,
+                  statusLine: _consumerStatusLine(),
                 ),
               ),
               // Calibration HUD — visibility is a runtime debug toggle.
@@ -666,7 +813,6 @@ class _CapturePageState extends State<CapturePage> {
                       )
                     : const SizedBox.shrink(),
               ),
-              // Action icons: cancel, share, bake settings (brush), scan settings.
               Positioned(
                 top: 0,
                 right: 0,
@@ -676,14 +822,18 @@ class _CapturePageState extends State<CapturePage> {
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
                         if (state.status == CaptureStatus.capturing)
-                          IconButton(
-                            tooltip: 'Cancel',
-                            icon: const Icon(
-                              Icons.close,
-                              color: Colors.white70,
-                              size: 24,
+                          Semantics(
+                            button: true,
+                            label: 'Cancel scan',
+                            child: IconButton(
+                              tooltip: 'Cancel',
+                              icon: const Icon(
+                                Icons.close,
+                                color: Colors.white70,
+                                size: 24,
+                              ),
+                              onPressed: _cancelScan,
                             ),
-                            onPressed: _cancelScan,
                           ),
                         if (_baked != null)
                           IconButton(
@@ -695,26 +845,41 @@ class _CapturePageState extends State<CapturePage> {
                             ),
                             onPressed: () => unawaited(_shareModel()),
                           ),
-                        if (kShowDevMenu) ...<Widget>[
-                          IconButton(
-                            tooltip: 'Bake settings',
+                        IconButton(
+                          tooltip: 'Bake settings',
+                          icon: Icon(
+                            Icons.brush,
+                            color: _baking ? ScanTheme.accent : Colors.white70,
+                            size: 24,
+                          ),
+                          onPressed: _openBakeSettings,
+                        ),
+                        Semantics(
+                          button: true,
+                          label: 'How to scan',
+                          child: IconButton(
+                            tooltip: 'How to scan',
                             icon: const Icon(
-                              Icons.brush,
+                              Icons.help_outline,
                               color: Colors.white70,
                               size: 24,
                             ),
-                            onPressed: _openBakeSettings,
+                            onPressed: _showHowToScan,
                           ),
-                          IconButton(
-                            tooltip: 'Scan settings',
+                        ),
+                        Semantics(
+                          button: true,
+                          label: 'Settings',
+                          child: IconButton(
+                            tooltip: 'Settings',
                             icon: const Icon(
                               Icons.settings,
                               color: Colors.white70,
                               size: 24,
                             ),
-                            onPressed: _openScanSettings,
+                            onPressed: _openSettings,
                           ),
-                        ],
+                        ),
                       ],
                     ),
                   ),
@@ -725,5 +890,17 @@ class _CapturePageState extends State<CapturePage> {
         ),
       ),
     );
+  }
+
+  String? _consumerStatusLine() {
+    if (_saving) {
+      return 'Saving…';
+    }
+    if (_didPersistCurrent && !_baking) {
+      return 'Saved on this device';
+    }
+    // Bake / ml-wb timing stays in the bake sheet + console — not on the
+    // consumer guidance surface.
+    return null;
   }
 }

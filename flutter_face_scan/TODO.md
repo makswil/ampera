@@ -54,3 +54,13 @@ not a sharpness replacement. Needs capturing the depth frame natively.
 - Texture resolution is always source/original (both < 4096); the manual
   resolution setting was removed. ARKit video 1.5 MP and the 7 MP photo both fit
   a 4096² atlas.
+
+## UX follow-ups (parked)
+
+End-user polish ideas — not blocking current scan UX pass:
+
+- Short pose-transition cue (~800 ms): “Next: turn left”, then correction hints
+- Lightweight silhouette preview of the next pose before it starts
+- Brief success checkmark inside the face outline (in addition to flash)
+- Calmer post-scan “Saved ✓” without any bake/dev status on the guidance surface
+- Consumer build: Settings (distance) + `?` help; hide Bake icon

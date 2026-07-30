@@ -2,10 +2,9 @@ import 'package:flutter/foundation.dart';
 
 import '../../domain/value_objects/pose_tolerance.dart';
 
-/// Whether the in-app tools button (⚙ → HUD/mesh toggles + manage scans) is
-/// shown. Kept as a single switch so it can be turned off for production by
-/// setting this to `false` (or `bool.fromEnvironment` if you prefer a define).
-const bool kShowDevMenu = true;
+/// Dev-only chrome (bake sheet, HUD/mesh, texture toggles, manage-scans).
+/// Off in release/profile so end users only see the scan flow + one setting.
+const bool kShowDevMenu = kDebugMode;
 
 /// Runtime-toggleable debug flags, so the calibration HUD / mesh overlay can be
 /// switched on the device without a rebuild. Seeded from the compile-time
@@ -25,8 +24,8 @@ class DebugSettings extends ChangeNotifier {
     double? targetDistanceMeters,
     bool? mlWb,
     bool? mlWbMatchFrontal,
-  }) : _showHud = showHud ?? true,
-       _showMesh = showMesh ?? true,
+  }) : _showHud = showHud ?? false,
+       _showMesh = showMesh ?? false,
        _fillHoles = fillHoles ?? true,
        _hiResPhoto = hiResPhoto ?? true,
        _lockAeAwb = lockAeAwb ?? true,

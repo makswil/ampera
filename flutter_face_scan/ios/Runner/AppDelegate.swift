@@ -64,6 +64,8 @@ enum FaceTrackingPlugin {
         } else {
           manager.captureStill(result: result)
         }
+      case "previewFreeze":
+        manager.previewFreezeJpeg(result: result)
       case "shareFiles":
         let paths = (call.arguments as? [String: Any])?["paths"] as? [String] ?? []
         // Present on main; completion resolves the method channel so Dart isn't
@@ -96,6 +98,16 @@ enum FaceTrackingPlugin {
         let indices = (args?["axisIndices"] as? [NSNumber])?.map { $0.intValue } ?? []
         manager.configureOverlay(showMesh: show, axisIndices: indices)
         result(nil)
+      case "openAppSettings":
+        DispatchQueue.main.async {
+          guard let url = URL(string: UIApplication.openSettingsURLString) else {
+            result(nil)
+            return
+          }
+          UIApplication.shared.open(url, options: [:]) { _ in
+            result(nil)
+          }
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -161,6 +173,9 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   /// `lockAeAwb` is on so later poses don't re-auto and shift colour/exposure.
   private var lockedLook: LockedCameraLook?
 
+  /// Fires once when the first ARFrame arrives after resume (or on timeout).
+  private var onPreviewLive: (() -> Void)?
+
   private override init() {
     sceneView = ARSCNView(frame: .zero)
     super.init()
@@ -179,6 +194,38 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       ))
       return
     }
+
+    let cameraStatus = AVCaptureDevice.authorizationStatus(for: .video)
+    switch cameraStatus {
+    case .denied, .restricted:
+      eventSink?(FlutterError(
+        code: "permission",
+        message: "Camera permission denied. Enable camera access in Settings.",
+        details: nil
+      ))
+      return
+    case .notDetermined:
+      AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+        DispatchQueue.main.async {
+          guard let self = self else { return }
+          if granted {
+            self.start()
+          } else {
+            self.eventSink?(FlutterError(
+              code: "permission",
+              message: "Camera permission denied. Enable camera access in Settings.",
+              details: nil
+            ))
+          }
+        }
+      }
+      return
+    case .authorized:
+      break
+    @unknown default:
+      break
+    }
+
     let configuration = ARFaceTrackingConfiguration()
     configuration.maximumNumberOfTrackedFaces = 1
     configuration.isLightEstimationEnabled = false
@@ -226,6 +273,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
 
   func stop() {
     lockedLook = nil
+    onPreviewLive = nil
     sceneView.session.pause()
     isRunning = false
     sentTopology = false
@@ -275,21 +323,9 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     }
   }
 
-  /// Hi-res texture variant: grabs the ARKit registration (view/projection/face
-  /// matrices) from the current frame, then pauses ARKit, shoots a full-res
-  /// AVCapturePhoto on the front TrueDepth camera and resumes ARKit.
-  ///
-  /// Registration works because ARKit's `projectionMatrix` is resolution-
-  /// independent (encodes FOV, not pixels) and both feeds are 4:3 off the same
-  /// lens — so the mesh projected with ARKit's `view·projection` lands on the
-  /// 7 MP grid directly (Dart maps NDC → the returned width/height). The head is
-  /// held still during the 2.5 s hold, so the matrices captured just before the
-  /// pause still describe the photographed pose.
-  ///
-  /// If anything fails (unsupported device, capture error) it falls back to the
-  /// ARKit video-res still captured from the SAME frame, so a pose is never lost
-  /// and the app stays usable. On top of that the Dart-side toggle lets the user
-  /// switch back to the stable ARKit path with one tap.
+  /// Pause ARKit, shoot a full-res AVCapture photo, resume. Returns ARKit
+  /// registration matrices from the pre-pause frame plus the photo JPEG.
+  /// Falls back to the ARKit video still from that same frame on failure.
   func captureHiResStill(lockAeAwb: Bool, result: @escaping FlutterResult) {
     guard let frame = sceneView.session.currentFrame,
           frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first != nil
@@ -298,8 +334,6 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       return
     }
 
-    // Registration + a video-res fallback, both from this one frame so pixels
-    // and matrices agree even if the hi-res shot later fails.
     let fallback = stillDict(from: frame)
 
     let photoLandscape = frontPhotoResolution == .zero
@@ -307,7 +341,6 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       : frontPhotoResolution
     guard photoLandscape != .zero else { result(fallback); return }
 
-    // ARKit reports the sensor in landscape; the portrait photo swaps the axes.
     let portraitSize = CGSize(
       width: photoLandscape.height,
       height: photoLandscape.width
@@ -324,46 +357,91 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     )
     logFovDiagnostics(frame)
 
-    // Free the TrueDepth camera for AVCapture, then shoot.
-    sceneView.session.pause()
-
-    capturePhoto(lockAeAwb: lockAeAwb) { [weak self] ciImage in
+    let shoot: () -> Void = { [weak self] in
       guard let self = self else {
-        DispatchQueue.main.async { result(fallback) }
+        result(fallback)
         return
       }
-      // Re-run ARKit as early as possible to minimise the preview freeze.
-      DispatchQueue.main.async { self.resumeSession() }
+      self.sceneView.session.pause()
 
-      guard let ciImage = ciImage else {
-        DispatchQueue.main.async { result(fallback) }
-        return
+      self.capturePhoto(lockAeAwb: lockAeAwb) { [weak self] ciImage in
+        guard let self = self else {
+          DispatchQueue.main.async { result(fallback) }
+          return
+        }
+
+        let payload: [String: Any]? = {
+          guard let ciImage = ciImage else { return nil }
+          // Match ARKit portrait + un-mirror front-camera buffer.
+          let portrait = ciImage.oriented(.right)
+          let matched = portrait.transformed(by: CGAffineTransform(scaleX: -1, y: 1))
+          guard let cg = self.ciContext.createCGImage(matched, from: matched.extent),
+                let jpeg = UIImage(cgImage: cg).jpegData(compressionQuality: 0.95)
+          else { return nil }
+          return [
+            "jpeg": FlutterStandardTypedData(bytes: jpeg),
+            "width": cg.width,
+            "height": cg.height,
+            "viewMatrix": self.float32Data(view),
+            "projectionMatrix": self.float32Data(projection),
+            "faceTransform": self.float32Data(faceTransform),
+          ]
+        }()
+
+        // Resolve only after the first live AR frame so Flutter can flip UI safely.
+        DispatchQueue.main.async {
+          self.resumeSession()
+          self.whenPreviewLive {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+              result(payload ?? fallback)
+            }
+          }
+        }
       }
-
-      // Orient to portrait like ARKit, then flip horizontally: the front-camera
-      // AVCapture buffer comes mirrored relative to ARKit's `capturedImage`
-      // convention (the registration matrices are ARKit's). Without the flip,
-      // features land on the wrong side (moles mirrored) and side-pose samples
-      // project off-face → invalid/blue regions in the bake.
-      let portrait = ciImage.oriented(.right)
-      let matched = portrait.transformed(by: CGAffineTransform(scaleX: -1, y: 1))
-      guard let cg = self.ciContext.createCGImage(matched, from: matched.extent),
-            let jpeg = UIImage(cgImage: cg).jpegData(compressionQuality: 0.95)
-      else {
-        DispatchQueue.main.async { result(fallback) }
-        return
-      }
-
-      let dict: [String: Any] = [
-        "jpeg": FlutterStandardTypedData(bytes: jpeg),
-        "width": cg.width,
-        "height": cg.height,
-        "viewMatrix": self.float32Data(view),
-        "projectionMatrix": self.float32Data(projection),
-        "faceTransform": self.float32Data(faceTransform),
-      ]
-      DispatchQueue.main.async { result(dict) }
     }
+
+    if Thread.isMainThread {
+      shoot()
+    } else {
+      DispatchQueue.main.async(execute: shoot)
+    }
+  }
+
+  /// JPEG of the live ARSCNView for Flutter's handoff cover.
+  func previewFreezeJpeg(result: @escaping FlutterResult) {
+    let deliver: () -> Void = { [weak self] in
+      guard let self = self else {
+        result(nil)
+        return
+      }
+      let image = self.sceneView.snapshot()
+      guard let data = image.jpegData(compressionQuality: 0.75) else {
+        result(nil)
+        return
+      }
+      result(FlutterStandardTypedData(bytes: data))
+    }
+    if Thread.isMainThread {
+      deliver()
+    } else {
+      DispatchQueue.main.async(execute: deliver)
+    }
+  }
+
+  private func whenPreviewLive(_ block: @escaping () -> Void) {
+    var done = false
+    let fire: () -> Void = { [weak self] in
+      guard !done else { return }
+      done = true
+      self?.onPreviewLive = nil
+      block()
+    }
+    onPreviewLive = fire
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.55, execute: fire)
+  }
+
+  func session(_ session: ARSession, didUpdate frame: ARFrame) {
+    onPreviewLive?()
   }
 
   /// Lazily builds/reuses the front-camera photo session, runs it, shoots one
@@ -397,6 +475,10 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
         settings.maxPhotoDimensions = output.maxPhotoDimensions
       } else {
         settings.isHighResolutionPhotoEnabled = true
+      }
+      // Prefer our soft Flutter cue over the stock camera shutter (when allowed).
+      if #available(iOS 18.0, *), output.isShutterSoundSuppressionSupported {
+        settings.isShutterSoundSuppressionEnabled = true
       }
 
       let delegate = PhotoCaptureDelegate { [weak self] image in
