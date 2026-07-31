@@ -47,7 +47,7 @@ final class FileSnapshotRepository implements SnapshotRepository {
       await plyFile.writeAsString(ply);
       files.add(plyFile.path);
 
-      // Per-pose RGB still + its camera projection, if captured.
+      // Per-pose RGB still + its camera projection, if captured (bake epoch).
       String? imageName;
       final StillCapture? still = session.stills[snapshot.pose];
       if (still != null && still.bytes.isNotEmpty) {
@@ -57,14 +57,47 @@ final class FileSnapshotRepository implements SnapshotRepository {
         files.add(imageFile.path);
       }
 
-      poseEntries.add(_poseEntry(snapshot, plyName, imageName, still));
+      String? rearImageName;
+      final StillCapture? rearStill = session.rearStills[snapshot.pose];
+      if (rearStill != null && rearStill.bytes.isNotEmpty) {
+        rearImageName = '${snapshot.pose.name}_rear.jpg';
+        final File rearFile = File('${dir.path}/$rearImageName');
+        await rearFile.writeAsBytes(rearStill.bytes);
+        files.add(rearFile.path);
+      }
+
+      poseEntries.add(
+        _poseEntry(snapshot, plyName, imageName, still, rearImageName),
+      );
     }
 
+    final bool hasRearPass = session.rearStills.values.any(
+      (StillCapture s) => s.bytes.isNotEmpty,
+    );
     final Map<String, Object?> manifest = <String, Object?>{
       'id': session.id,
       'createdAt': session.createdAt.toIso8601String(),
-      'schemaVersion': 3,
+      'schemaVersion': 4,
       'expression': session.expression.name,
+      'captureActor': session.actorMode.name,
+      'practitionerFlow': session.practitionerFlow.name,
+      'meshMotion': session.meshMotion.name,
+      'clinicianCamera': session.clinicianCamera.name,
+      'rearCaptureKind': session.rearCaptureKind.name,
+      if (session.meshRefSessionId != null)
+        'meshRefSessionId': session.meshRefSessionId,
+      'stabilityProfile': session.stabilityProfile.name,
+      'meshPass': <String, Object?>{
+        'camera': 'front',
+        'meshMotion': session.meshMotion.name,
+        if (session.meshRefSessionId != null)
+          'refSessionId': session.meshRefSessionId,
+      },
+      if (hasRearPass)
+        'photoPass': <String, Object?>{
+          'camera': session.clinicianCamera.name,
+          'mode': session.rearCaptureKind.name,
+        },
       // Per-vertex UVs (constant across poses) — the bake output layout.
       'textureCoordinates': _textureCoordinates(session),
       'poses': poseEntries,
@@ -89,6 +122,7 @@ final class FileSnapshotRepository implements SnapshotRepository {
     String plyName,
     String? imageName,
     StillCapture? still,
+    String? rearImageName,
   ) {
     return <String, Object?>{
       'pose': snapshot.pose.name,
@@ -96,6 +130,7 @@ final class FileSnapshotRepository implements SnapshotRepository {
       'vertexCount': snapshot.observation.vertexCount,
       'pointCloudFile': plyName,
       'imageFile': ?imageName,
+      'rearImageFile': ?rearImageName,
       'eulerAngles': <String, double>{
         'yaw': snapshot.observation.eulerAngles.yaw,
         'pitch': snapshot.observation.eulerAngles.pitch,

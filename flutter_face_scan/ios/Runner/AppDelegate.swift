@@ -6,6 +6,7 @@ import CoreML
 import Flutter
 import SceneKit
 import UIKit
+import Vision
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -122,6 +123,49 @@ enum FaceTrackingPlugin {
     registrar.register(
       FacePreviewFactory(),
       withId: "flutter_face_scan/face_preview"
+    )
+
+    // Rear camera guided photo path (clinician / Vision pose).
+    let rear = RearCaptureManager.shared
+    let rearControl = FlutterMethodChannel(
+      name: "flutter_face_scan/rear_capture",
+      binaryMessenger: messenger
+    )
+    rearControl.setMethodCallHandler { call, result in
+      switch call.method {
+      case "start":
+        let mode = (call.arguments as? [String: Any])?["mode"] as? String ?? "photo"
+        rear.start(mode: mode, result: result)
+      case "stop":
+        rear.stop()
+        result(nil)
+      case "captureStill":
+        let lockAeAwb =
+          (call.arguments as? [String: Any])?["lockAeAwb"] as? Bool ?? true
+        rear.captureStill(lockAeAwb: lockAeAwb, result: result)
+      case "previewFreeze":
+        rear.previewFreezeJpeg(result: result)
+      case "beginHarvest":
+        let lockAeAwb =
+          (call.arguments as? [String: Any])?["lockAeAwb"] as? Bool ?? true
+        rear.beginHarvest(lockAeAwb: lockAeAwb)
+        result(nil)
+      case "takeHarvestedFrame":
+        rear.takeHarvestedFrame(result: result)
+      case "capabilities":
+        result(rear.capabilities())
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    let rearFrames = FlutterEventChannel(
+      name: "flutter_face_scan/rear_capture/frames",
+      binaryMessenger: messenger
+    )
+    rearFrames.setStreamHandler(rear)
+    registrar.register(
+      RearPreviewFactory(),
+      withId: "flutter_face_scan/rear_preview"
     )
   }
 }
@@ -761,8 +805,13 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   private func emit(_ anchor: ARAnchor) {
     guard isRunning,
           let faceAnchor = anchor as? ARFaceAnchor,
-          let sink = eventSink else { return }
-    sink(payload(from: faceAnchor))
+          eventSink != nil else { return }
+    // ARSCNView callbacks run off the platform thread; EventChannel sinks must
+    // be invoked on the main/platform thread.
+    let data = payload(from: faceAnchor)
+    DispatchQueue.main.async { [weak self] in
+      self?.eventSink?(data)
+    }
   }
 
   private func payload(from faceAnchor: ARFaceAnchor) -> [String: Any] {
@@ -1061,6 +1110,659 @@ final class FacePreviewView: NSObject, FlutterPlatformView {
 
   func view() -> UIView {
     return sceneView
+  }
+}
+
+// MARK: - Rear camera capture (Vision pose + AVCapture photo)
+
+/// Clinician rear-camera path: live preview, Vision yaw/pitch/roll, hi-res stills.
+final class RearCaptureManager: NSObject, FlutterStreamHandler {
+  static let shared = RearCaptureManager()
+
+  let previewView = RearPreviewUIView(frame: .zero)
+
+  private let session = AVCaptureSession()
+  private let sessionQueue = DispatchQueue(label: "face_scan.rear.session")
+  private let visionQueue = DispatchQueue(label: "face_scan.rear.vision")
+  private var photoOutput: AVCapturePhotoOutput?
+  private var videoOutput: AVCaptureVideoDataOutput?
+  private var photoDevice: AVCaptureDevice?
+  private var eventSink: FlutterEventSink?
+  private var isRunning = false
+  private var latestPixelBuffer: CVPixelBuffer?
+  private var photoResult: FlutterResult?
+  private let ciContext = CIContext()
+  /// "photo" (still AVCapturePhoto) or "video" (4K-ish frames + sharpness harvest).
+  private var captureMode: String = "photo"
+  private var configuredMode: String?
+  private var harvesting = false
+  private var bestSharpness: Double = -1
+  private var bestJpeg: Data?
+  private var bestWidth = 0
+  private var bestHeight = 0
+  private let harvestLock = NSLock()
+  /// Settled ISO/shutter/WB after the first rear shot (or first harvest).
+  private var lockedLook: LockedCameraLook?
+
+  func capabilities() -> [String: Any] {
+    var rearPhotoW = 0, rearPhotoH = 0, rearVideoW = 0, rearVideoH = 0
+    if let device = AVCaptureDevice.default(
+      .builtInWideAngleCamera, for: .video, position: .back
+    ) {
+      for format in device.formats {
+        if #available(iOS 16.0, *),
+           let dim = format.supportedMaxPhotoDimensions.max(by: {
+             Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+           }) {
+          let w = Int(dim.width), h = Int(dim.height)
+          if w * h > rearPhotoW * rearPhotoH { rearPhotoW = w; rearPhotoH = h }
+        } else {
+          let dim = format.highResolutionStillImageDimensions
+          let w = Int(dim.width), h = Int(dim.height)
+          if w * h > rearPhotoW * rearPhotoH { rearPhotoW = w; rearPhotoH = h }
+        }
+        let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        let w = Int(dims.width), h = Int(dims.height)
+        if w * h > rearVideoW * rearVideoH { rearVideoW = w; rearVideoH = h }
+      }
+    }
+    var frontPhotoW = 0, frontPhotoH = 0
+    if let device = AVCaptureDevice.default(
+      .builtInTrueDepthCamera, for: .video, position: .front
+    ) {
+      for format in device.formats {
+        if #available(iOS 16.0, *),
+           let dim = format.supportedMaxPhotoDimensions.max(by: {
+             Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+           }) {
+          let w = Int(dim.width), h = Int(dim.height)
+          if w * h > frontPhotoW * frontPhotoH { frontPhotoW = w; frontPhotoH = h }
+        }
+      }
+    }
+    return [
+      "rearPhotoWidth": rearPhotoW,
+      "rearPhotoHeight": rearPhotoH,
+      "rearVideoWidth": rearVideoW,
+      "rearVideoHeight": rearVideoH,
+      "frontPhotoWidth": frontPhotoW,
+      "frontPhotoHeight": frontPhotoH,
+      "rearSupported": rearPhotoW > 0,
+    ]
+  }
+
+  func start(mode: String, result: @escaping FlutterResult) {
+    let normalized = (mode == "video") ? "video" : "photo"
+    sessionQueue.async { [weak self] in
+      guard let self = self else { return }
+      if self.isRunning && self.captureMode == normalized {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      if self.isRunning {
+        self.session.stopRunning()
+        self.isRunning = false
+      }
+      // New rear session — don't carry AE/AWB from a previous scan/mode.
+      self.lockedLook = nil
+      self.captureMode = normalized
+      do {
+        try self.configureSessionIfNeeded(mode: normalized)
+      } catch {
+        DispatchQueue.main.async {
+          result(FlutterError(
+            code: "rear_unavailable",
+            message: error.localizedDescription,
+            details: nil
+          ))
+        }
+        return
+      }
+      self.session.startRunning()
+      self.isRunning = true
+      DispatchQueue.main.async { result(nil) }
+    }
+  }
+
+  func stop() {
+    sessionQueue.async { [weak self] in
+      guard let self = self, self.isRunning else { return }
+      self.session.stopRunning()
+      self.isRunning = false
+      self.latestPixelBuffer = nil
+      self.lockedLook = nil
+      self.resetHarvestLocked()
+      self.harvesting = false
+    }
+  }
+
+  /// Reset sharpness harvest; optionally settle/lock AE/AWB for the video pass.
+  func beginHarvest(lockAeAwb: Bool) {
+    sessionQueue.async { [weak self] in
+      guard let self = self else { return }
+      if !lockAeAwb {
+        self.lockedLook = nil
+      } else if self.isRunning {
+        self.applyCameraLook(lockAeAwb: true)
+      }
+      self.harvestLock.lock()
+      self.resetHarvestLocked()
+      self.harvesting = true
+      self.harvestLock.unlock()
+    }
+  }
+
+  func takeHarvestedFrame(result: @escaping FlutterResult) {
+    harvestLock.lock()
+    let jpeg = bestJpeg
+    let width = bestWidth
+    let height = bestHeight
+    let sharpness = bestSharpness
+    // Keep harvesting for the next pose.
+    resetHarvestLocked()
+    harvesting = true
+    harvestLock.unlock()
+
+    if let jpeg = jpeg, width > 0, height > 0 {
+      DispatchQueue.main.async { [weak self] in
+        guard let self = self else { result(nil); return }
+        result(self.stillPayload(
+          jpeg: jpeg, width: width, height: height, sharpness: sharpness
+        ))
+      }
+      return
+    }
+    sessionQueue.async { [weak self] in
+      guard let self = self,
+            let pb = self.latestPixelBuffer,
+            let typed = self.jpegFromPixelBuffer(pb) else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      let w = CVPixelBufferGetWidth(pb)
+      let h = CVPixelBufferGetHeight(pb)
+      DispatchQueue.main.async {
+        result(self.stillPayload(
+          jpeg: typed.data, width: w, height: h, sharpness: -1
+        ))
+      }
+    }
+  }
+
+  private func resetHarvestLocked() {
+    bestSharpness = -1
+    bestJpeg = nil
+    bestWidth = 0
+    bestHeight = 0
+  }
+
+  private func stillPayload(
+    jpeg: Data, width: Int, height: Int, sharpness: Double
+  ) -> [String: Any] {
+    let identity: [Float] = [
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      0, 0, 0, 1,
+    ]
+    let idData = identity.withUnsafeBufferPointer { Data(buffer: $0) }
+    let idTyped = FlutterStandardTypedData(float32: idData)
+    return [
+      "jpeg": FlutterStandardTypedData(bytes: jpeg),
+      "width": width,
+      "height": height,
+      "sharpness": sharpness,
+      "source": captureMode == "video" ? "videoFrame" : "still",
+      "viewMatrix": idTyped,
+      "projectionMatrix": idTyped,
+      "faceTransform": idTyped,
+    ]
+  }
+
+  private func configureSessionIfNeeded(mode: String) throws {
+    if photoOutput != nil && configuredMode == mode { return }
+
+    if photoOutput != nil {
+      session.beginConfiguration()
+      for input in session.inputs { session.removeInput(input) }
+      for output in session.outputs { session.removeOutput(output) }
+      session.commitConfiguration()
+      photoOutput = nil
+      videoOutput = nil
+    }
+
+    guard let device = AVCaptureDevice.default(
+      .builtInWideAngleCamera, for: .video, position: .back
+    ) else {
+      throw NSError(
+        domain: "face_scan", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Rear camera unavailable"]
+      )
+    }
+    photoDevice = device
+    configuredMode = mode
+    session.beginConfiguration()
+    if mode == "video" {
+      if session.canSetSessionPreset(.hd4K3840x2160) {
+        session.sessionPreset = .hd4K3840x2160
+      } else if session.canSetSessionPreset(.high) {
+        session.sessionPreset = .high
+      } else {
+        session.sessionPreset = .photo
+      }
+    } else {
+      session.sessionPreset = .photo
+    }
+    let input = try AVCaptureDeviceInput(device: device)
+    if session.canAddInput(input) { session.addInput(input) }
+
+    let photo = AVCapturePhotoOutput()
+    if session.canAddOutput(photo) { session.addOutput(photo) }
+    if #available(iOS 16.0, *),
+       let maxDim = device.activeFormat.supportedMaxPhotoDimensions.max(by: {
+         Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+       }) {
+      photo.maxPhotoDimensions = maxDim
+    } else {
+      photo.isHighResolutionCaptureEnabled = true
+    }
+    photoOutput = photo
+
+    let video = AVCaptureVideoDataOutput()
+    video.alwaysDiscardsLateVideoFrames = true
+    video.videoSettings = [
+      kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+    ]
+    video.setSampleBufferDelegate(self, queue: visionQueue)
+    if session.canAddOutput(video) { session.addOutput(video) }
+    if let conn = video.connection(with: .video) {
+      if conn.isVideoOrientationSupported {
+        conn.videoOrientation = .portrait
+      }
+    }
+    videoOutput = video
+    session.commitConfiguration()
+
+    DispatchQueue.main.async { [weak self] in
+      guard let self = self else { return }
+      self.previewView.attach(session: self.session)
+    }
+  }
+
+  /// Laplacian-variance proxy on a downsampled luma grid (higher = sharper).
+  private func sharpnessScore(_ pb: CVPixelBuffer) -> Double {
+    CVPixelBufferLockBaseAddress(pb, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(pb) else { return 0 }
+    let width = CVPixelBufferGetWidth(pb)
+    let height = CVPixelBufferGetHeight(pb)
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(pb)
+    let step = max(4, min(width, height) / 64)
+    var sum = 0.0
+    var sumSq = 0.0
+    var count = 0.0
+    let ptr = base.assumingMemoryBound(to: UInt8.self)
+    var y = step
+    while y < height - step {
+      var x = step
+      while x < width - step {
+        let o = y * bytesPerRow + x * 4
+        let c = Double(ptr[o]) // BGRA — blue≈luma enough for blur reject
+        let l = Double(ptr[o - 4])
+        let r = Double(ptr[o + 4])
+        let u = Double(ptr[o - bytesPerRow])
+        let d = Double(ptr[o + bytesPerRow])
+        let lap = abs(4 * c - l - r - u - d)
+        sum += lap
+        sumSq += lap * lap
+        count += 1
+        x += step
+      }
+      y += step
+    }
+    guard count > 0 else { return 0 }
+    let mean = sum / count
+    return max(0, sumSq / count - mean * mean)
+  }
+
+  func captureStill(lockAeAwb: Bool, result: @escaping FlutterResult) {
+    sessionQueue.async { [weak self] in
+      guard let self = self,
+            let output = self.photoOutput,
+            self.isRunning else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      if self.photoResult != nil {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      if !lockAeAwb {
+        self.lockedLook = nil
+      }
+      self.applyCameraLook(lockAeAwb: lockAeAwb)
+      self.photoResult = result
+      let settings = AVCapturePhotoSettings()
+      if #available(iOS 16.0, *) {
+        settings.maxPhotoDimensions = output.maxPhotoDimensions
+      } else {
+        settings.isHighResolutionPhotoEnabled = true
+      }
+      output.capturePhoto(with: settings, delegate: self)
+    }
+  }
+
+  /// Auto-settle then optionally snapshot/lock, or re-apply a prior lock.
+  /// Must run on `sessionQueue` with the session running.
+  private func applyCameraLook(lockAeAwb: Bool) {
+    guard let device = photoDevice else { return }
+
+    if lockAeAwb, let look = lockedLook {
+      applyLockedLook(look, on: device)
+      Thread.sleep(forTimeInterval: 0.05)
+      return
+    }
+
+    do {
+      try device.lockForConfiguration()
+      if device.isExposureModeSupported(.continuousAutoExposure) {
+        device.exposureMode = .continuousAutoExposure
+      }
+      if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+        device.whiteBalanceMode = .continuousAutoWhiteBalance
+      }
+      device.unlockForConfiguration()
+    } catch {
+      NSLog("[face_scan] rear AE/AWB auto config failed: \(error)")
+    }
+
+    Thread.sleep(forTimeInterval: 0.1)
+    let deadline = Date().addingTimeInterval(0.8)
+    while Date() < deadline,
+          device.isAdjustingExposure || device.isAdjustingWhiteBalance {
+      Thread.sleep(forTimeInterval: 0.03)
+    }
+
+    guard lockAeAwb else { return }
+
+    let iso = device.iso
+    let duration = device.exposureDuration
+    let gains = device.deviceWhiteBalanceGains
+    lockedLook = LockedCameraLook(iso: iso, duration: duration, gains: gains)
+    applyLockedLook(LockedCameraLook(iso: iso, duration: duration, gains: gains), on: device)
+    NSLog(
+      "[face_scan] rear AE/AWB locked iso=%.0f duration=%.4fs gains=r%.2f g%.2f b%.2f",
+      iso,
+      CMTimeGetSeconds(duration),
+      gains.redGain, gains.greenGain, gains.blueGain
+    )
+  }
+
+  private func applyLockedLook(_ look: LockedCameraLook, on device: AVCaptureDevice) {
+    do {
+      try device.lockForConfiguration()
+      let format = device.activeFormat
+      let iso = min(max(look.iso, format.minISO), format.maxISO)
+      var duration = look.duration
+      if CMTimeCompare(duration, format.minExposureDuration) < 0 {
+        duration = format.minExposureDuration
+      }
+      if CMTimeCompare(duration, format.maxExposureDuration) > 0 {
+        duration = format.maxExposureDuration
+      }
+      if device.isExposureModeSupported(.custom) {
+        device.setExposureModeCustom(duration: duration, iso: iso, completionHandler: nil)
+      }
+      if device.isWhiteBalanceModeSupported(.locked) {
+        let gains = clampWhiteBalanceGains(look.gains, on: device)
+        device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
+      }
+      device.unlockForConfiguration()
+    } catch {
+      NSLog("[face_scan] rear AE/AWB lock apply failed: \(error)")
+    }
+  }
+
+  private func clampWhiteBalanceGains(
+    _ gains: AVCaptureDevice.WhiteBalanceGains,
+    on device: AVCaptureDevice
+  ) -> AVCaptureDevice.WhiteBalanceGains {
+    let maxG = device.maxWhiteBalanceGain
+    func clamp(_ v: Float) -> Float { min(maxG, max(1.0, v)) }
+    return AVCaptureDevice.WhiteBalanceGains(
+      redGain: clamp(gains.redGain),
+      greenGain: clamp(gains.greenGain),
+      blueGain: clamp(gains.blueGain)
+    )
+  }
+
+  func previewFreezeJpeg(result: @escaping FlutterResult) {
+    sessionQueue.async { [weak self] in
+      guard let self = self, let pb = self.latestPixelBuffer else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      let jpeg = self.jpegFromPixelBuffer(pb)
+      DispatchQueue.main.async { result(jpeg) }
+    }
+  }
+
+  private func jpegFromPixelBuffer(_ pb: CVPixelBuffer) -> FlutterStandardTypedData? {
+    let ci = CIImage(cvPixelBuffer: pb)
+    guard let cg = ciContext.createCGImage(ci, from: ci.extent),
+          let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.9)
+    else { return nil }
+    return FlutterStandardTypedData(bytes: data)
+  }
+
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+    eventSink = events
+    return nil
+  }
+
+  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    eventSink = nil
+    return nil
+  }
+
+  private func emitVision(from buffer: CVPixelBuffer, sharpness: Double) {
+    let request = VNDetectFaceRectanglesRequest()
+    if #available(iOS 15.0, *) {
+      request.revision = VNDetectFaceRectanglesRequestRevision3
+    }
+    let handler = VNImageRequestHandler(
+      cvPixelBuffer: buffer, orientation: .right, options: [:]
+    )
+    do {
+      try handler.perform([request])
+    } catch {
+      emitLost()
+      return
+    }
+    guard let face = request.results?.first else {
+      emitLost()
+      return
+    }
+    // Vision angles are radians; map into ARKit-style degrees for the Dart gate.
+    // `pitch` (and continuous angles) require iOS 15+ / revision 3.
+    let yawRad = face.yaw?.doubleValue ?? 0
+    let rollRad = face.roll?.doubleValue ?? 0
+    let pitchRad: Double
+    if #available(iOS 15.0, *) {
+      pitchRad = face.pitch?.doubleValue ?? 0
+    } else {
+      pitchRad = 0
+    }
+    // Flip yaw so + = subject's left (matches FacePose / GuidedPoseValidator).
+    let yawDeg = -yawRad * 180.0 / Double.pi
+    let pitchDeg = pitchRad * 180.0 / Double.pi
+    let rollDeg = rollRad * 180.0 / Double.pi
+    let box = face.boundingBox // Vision: origin bottom-left, normalized.
+    let cx = box.midX
+    let cy = 1.0 - box.midY // top-left origin for Dart screen space
+    let fw = box.width
+    let fh = box.height
+    let photo = maxPhotoSize()
+    let payload: [String: Any] = [
+      "timestampMicros": Int(Date().timeIntervalSince1970 * 1_000_000),
+      "isTracked": true,
+      "yawDegrees": yawDeg,
+      "pitchDegrees": pitchDeg,
+      "rollDegrees": rollDeg,
+      "faceCenterX": cx,
+      "faceCenterY": cy,
+      "faceWidth": fw,
+      "faceHeight": fh,
+      "photoWidth": photo.width,
+      "photoHeight": photo.height,
+      "captureWidth": CVPixelBufferGetWidth(buffer),
+      "captureHeight": CVPixelBufferGetHeight(buffer),
+      "sharpness": sharpness,
+      "captureMode": captureMode,
+    ]
+    DispatchQueue.main.async { [weak self] in
+      self?.eventSink?(payload)
+    }
+  }
+
+  private func emitLost() {
+    let payload: [String: Any] = [
+      "timestampMicros": Int(Date().timeIntervalSince1970 * 1_000_000),
+      "isTracked": false,
+    ]
+    DispatchQueue.main.async { [weak self] in
+      self?.eventSink?(payload)
+    }
+  }
+
+  private func maxPhotoSize() -> (width: Int, height: Int) {
+    guard let output = photoOutput else { return (0, 0) }
+    if #available(iOS 16.0, *) {
+      let d = output.maxPhotoDimensions
+      return (Int(d.width), Int(d.height))
+    }
+    return (0, 0)
+  }
+}
+
+extension RearCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+  func captureOutput(
+    _ output: AVCaptureOutput,
+    didOutput sampleBuffer: CMSampleBuffer,
+    from connection: AVCaptureConnection
+  ) {
+    guard isRunning,
+          let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+    latestPixelBuffer = pb
+    let score = sharpnessScore(pb)
+    harvestLock.lock()
+    if harvesting {
+      // Require a clear improvement to avoid rewriting JPEG every frame.
+      if bestJpeg == nil || score > bestSharpness * 1.02 {
+        if let typed = jpegFromPixelBuffer(pb) {
+          bestSharpness = score
+          bestJpeg = typed.data
+          bestWidth = CVPixelBufferGetWidth(pb)
+          bestHeight = CVPixelBufferGetHeight(pb)
+        }
+      }
+    }
+    harvestLock.unlock()
+    emitVision(from: pb, sharpness: score)
+  }
+}
+
+extension RearCaptureManager: AVCapturePhotoCaptureDelegate {
+  func photoOutput(
+    _ output: AVCapturePhotoOutput,
+    didFinishProcessingPhoto photo: AVCapturePhoto,
+    error: Error?
+  ) {
+    let resolve = photoResult
+    photoResult = nil
+    guard error == nil, let data = photo.fileDataRepresentation() else {
+      DispatchQueue.main.async { resolve?(nil) }
+      return
+    }
+    // Normalize to portrait JPEG for Dart StillCapture.
+    guard let image = UIImage(data: data) else {
+      DispatchQueue.main.async { resolve?(nil) }
+      return
+    }
+    let portrait = image.fixedPortraitJpeg()
+    let width = Int(portrait.image.size.width.rounded())
+    let height = Int(portrait.image.size.height.rounded())
+    let payload = stillPayload(
+      jpeg: portrait.jpeg, width: width, height: height, sharpness: -1
+    )
+    DispatchQueue.main.async { resolve?(payload) }
+  }
+}
+
+private extension UIImage {
+  /// Returns portrait-up JPEG bytes + size (handles EXIF orientation).
+  func fixedPortraitJpeg() -> (jpeg: Data, image: UIImage) {
+    let normalized: UIImage
+    if imageOrientation == .up {
+      normalized = self
+    } else {
+      UIGraphicsBeginImageContextWithOptions(size, false, scale)
+      draw(in: CGRect(origin: .zero, size: size))
+      normalized = UIGraphicsGetImageFromCurrentImageContext() ?? self
+      UIGraphicsEndImageContext()
+    }
+    let jpeg = normalized.jpegData(compressionQuality: 0.92) ?? Data()
+    return (jpeg, normalized)
+  }
+}
+
+final class RearPreviewFactory: NSObject, FlutterPlatformViewFactory {
+  func create(
+    withFrame frame: CGRect,
+    viewIdentifier viewId: Int64,
+    arguments args: Any?
+  ) -> FlutterPlatformView {
+    return RearPreviewPlatformView(frame: frame)
+  }
+
+  func createArgsCodec() -> FlutterMessageCodec & NSObjectProtocol {
+    return FlutterStandardMessageCodec.sharedInstance()
+  }
+}
+
+final class RearPreviewPlatformView: NSObject, FlutterPlatformView {
+  private let viewHost: RearPreviewUIView
+
+  init(frame: CGRect) {
+    viewHost = RearCaptureManager.shared.previewView
+    super.init()
+    viewHost.frame = frame
+  }
+
+  func view() -> UIView { viewHost }
+}
+
+final class RearPreviewUIView: UIView {
+  private var previewLayer: AVCaptureVideoPreviewLayer?
+
+  func attach(session: AVCaptureSession) {
+    if let existing = previewLayer {
+      existing.session = session
+      return
+    }
+    let layer = AVCaptureVideoPreviewLayer(session: session)
+    layer.videoGravity = .resizeAspectFill
+    self.layer.insertSublayer(layer, at: 0)
+    previewLayer = layer
+    setNeedsLayout()
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    previewLayer?.frame = bounds
+    if let conn = previewLayer?.connection, conn.isVideoOrientationSupported {
+      conn.videoOrientation = .portrait
+    }
   }
 }
 

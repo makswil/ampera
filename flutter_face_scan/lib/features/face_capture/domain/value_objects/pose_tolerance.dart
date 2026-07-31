@@ -1,5 +1,30 @@
 import 'package:equatable/equatable.dart';
 
+/// Handheld vs tripod capture strictness (parameters only — no hardware detect).
+enum CaptureStabilityProfile {
+  /// Default clinic / self-scan: forgiving jitter, ~2.5 s hold.
+  handheld(label: 'Hand'),
+
+  /// Device on a stand: tighter angles, shorter hold, less grace.
+  tripod(label: 'Tripod');
+
+  const CaptureStabilityProfile({required this.label});
+
+  final String label;
+
+  static CaptureStabilityProfile fromName(String? name) {
+    if (name == null || name.isEmpty) {
+      return CaptureStabilityProfile.handheld;
+    }
+    for (final CaptureStabilityProfile p in CaptureStabilityProfile.values) {
+      if (p.name == name) {
+        return p;
+      }
+    }
+    return CaptureStabilityProfile.handheld;
+  }
+}
+
 /// Acceptance thresholds for validating a held pose. Centralised so capture
 /// strictness is tunable in one place and identical across logic and tests.
 final class PoseTolerance extends Equatable {
@@ -14,6 +39,33 @@ final class PoseTolerance extends Equatable {
     this.holdDuration = const Duration(milliseconds: 2500),
     this.holdGrace = const Duration(milliseconds: 350),
   });
+
+  /// Preset for [profile], keeping the face-frame [targetDistanceMeters].
+  factory PoseTolerance.forProfile(
+    CaptureStabilityProfile profile, {
+    double targetDistanceMeters = kDefaultTargetDistanceMeters,
+  }) {
+    final double distance = targetDistanceMeters.clamp(
+      kMinTargetDistanceMeters,
+      kMaxTargetDistanceMeters,
+    );
+    return switch (profile) {
+      CaptureStabilityProfile.handheld => PoseTolerance(
+        targetDistanceMeters: distance,
+      ),
+      CaptureStabilityProfile.tripod => PoseTolerance(
+        yawToleranceDegrees: 3,
+        pitchToleranceDegrees: 3,
+        rollToleranceDegrees: 3,
+        maxScreenStraightness: 0.015,
+        maxScreenCenterOffset: 0.08,
+        targetDistanceMeters: distance,
+        distanceToleranceMeters: 0.04,
+        holdDuration: const Duration(milliseconds: 1200),
+        holdGrace: const Duration(milliseconds: 150),
+      ),
+    };
+  }
 
   /// Default face-frame distance: close enough for denser face pixels, still
   /// OK for side/chin-up poses without clipping (TrueDepth FOV).

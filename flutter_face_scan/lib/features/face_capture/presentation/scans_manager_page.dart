@@ -5,11 +5,21 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../data/scan_storage.dart';
+import '../data/session_folder_loader.dart';
 
 /// Lists saved scan sessions and lets the user delete them (individually or
 /// all) to reclaim storage.
+///
+/// When [pickMode] is true, tapping a bakeable session returns its id via
+/// [Navigator.pop] (for Prior mesh selection).
 class ScansManagerPage extends StatefulWidget {
-  const ScansManagerPage({super.key});
+  const ScansManagerPage({
+    this.pickMode = false,
+    super.key,
+  });
+
+  /// If true, only bakeable sessions are listed and a tap selects one.
+  final bool pickMode;
 
   @override
   State<ScansManagerPage> createState() => _ScansManagerPageState();
@@ -30,7 +40,15 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
     setState(() => _loading = true);
     final Directory documents = await getApplicationDocumentsDirectory();
     final ScanStorage storage = ScanStorage(rootDirectory: documents);
-    final List<ScanEntry> entries = await storage.list();
+    List<ScanEntry> entries = await storage.list();
+    if (widget.pickMode) {
+      entries = entries
+          .where(
+            (ScanEntry e) =>
+                SessionFolderLoader.directoryLooksBakeable(Directory(e.path)),
+          )
+          .toList(growable: false);
+    }
     if (!mounted) {
       return;
     }
@@ -77,21 +95,29 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
 
   @override
   Widget build(BuildContext context) {
+    final bool pick = widget.pickMode;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Saved scans'),
+        title: Text(pick ? 'Choose mesh scan' : 'Saved scans'),
         actions: <Widget>[
-          IconButton(
-            tooltip: 'Delete all',
-            onPressed: _entries.isEmpty ? null : _deleteAll,
-            icon: const Icon(Icons.delete_sweep),
-          ),
+          if (!pick)
+            IconButton(
+              tooltip: 'Delete all',
+              onPressed: _entries.isEmpty ? null : _deleteAll,
+              icon: const Icon(Icons.delete_sweep),
+            ),
         ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _entries.isEmpty
-          ? const Center(child: Text('No saved scans'))
+          ? Center(
+              child: Text(
+                pick
+                    ? 'No scans with a bakeable mesh'
+                    : 'No saved scans',
+              ),
+            )
           : ListView.separated(
               itemCount: _entries.length,
               separatorBuilder: (_, _) => const Divider(height: 1),
@@ -104,11 +130,16 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
                     '${_formatSize(entry.sizeBytes)} · '
                     '${_formatDate(entry.modified)}',
                   ),
-                  trailing: IconButton(
-                    tooltip: 'Delete',
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () => _deleteOne(entry),
-                  ),
+                  onTap: pick
+                      ? () => Navigator.pop(context, entry.id)
+                      : null,
+                  trailing: pick
+                      ? const Icon(Icons.chevron_right)
+                      : IconButton(
+                          tooltip: 'Delete',
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () => _deleteOne(entry),
+                        ),
                 );
               },
             ),

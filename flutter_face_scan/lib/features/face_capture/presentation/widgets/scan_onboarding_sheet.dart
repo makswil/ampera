@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../domain/entities/capture_actor_mode.dart';
 import '../scan_theme.dart';
 
 /// First-time / help dialog for the scan flow.
@@ -7,6 +8,7 @@ Future<bool?> showScanOnboardingSheet(
   BuildContext context, {
   required VoidCallback onStart,
   bool showStartButton = true,
+  CaptureActorMode actorMode = CaptureActorMode.user,
 }) {
   return showGeneralDialog<bool>(
     context: context,
@@ -48,7 +50,9 @@ Future<bool?> showScanOnboardingSheet(
                             color: ScanTheme.accent, size: 36),
                         const SizedBox(height: 14),
                         Text(
-                          'How to scan',
+                          actorMode == CaptureActorMode.practitioner
+                              ? 'Clinician scan'
+                              : 'How to scan',
                           style: Theme.of(dialogContext)
                               .textTheme
                               .titleLarge
@@ -59,24 +63,45 @@ Future<bool?> showScanOnboardingSheet(
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 20),
-                        _Bullet(
-                          icon: Icons.filter_4,
-                          text:
-                              "We'll capture 4 angles — front, left, right, chin up.",
-                          muted: muted,
-                        ),
-                        _Bullet(
-                          icon: Icons.timer_outlined,
-                          text:
-                              'Hold still for about 2–3 seconds at each angle.',
-                          muted: muted,
-                        ),
-                        _Bullet(
-                          icon: Icons.wb_sunny_outlined,
-                          text:
-                              'Keep your face in the outline, in good light. Glasses off if you can.',
-                          muted: muted,
-                        ),
+                        if (actorMode == CaptureActorMode.practitioner) ...<Widget>[
+                          _Bullet(
+                            icon: Icons.filter_4,
+                            text:
+                                '4 angles — front, left, right, under the chin.',
+                            muted: muted,
+                          ),
+                          _Bullet(
+                            icon: Icons.tablet_mac,
+                            text:
+                                'You move the iPad. Patient keeps still.',
+                            muted: muted,
+                          ),
+                          _Bullet(
+                            icon: Icons.timer_outlined,
+                            text:
+                                'Hold each angle ~2–3 seconds when it turns green.',
+                            muted: muted,
+                          ),
+                        ] else ...<Widget>[
+                          _Bullet(
+                            icon: Icons.filter_4,
+                            text:
+                                '4 angles — front, left, right, chin up.',
+                            muted: muted,
+                          ),
+                          _Bullet(
+                            icon: Icons.timer_outlined,
+                            text:
+                                'Hold still ~2–3 seconds at each angle.',
+                            muted: muted,
+                          ),
+                          _Bullet(
+                            icon: Icons.wb_sunny_outlined,
+                            text:
+                                'Face in the outline, good light. Glasses off if you can.',
+                            muted: muted,
+                          ),
+                        ],
                         const SizedBox(height: 28),
                         if (showStartButton)
                           FilledButton(

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_face_scan/features/face_capture/data/file_snapshot_repository.dart';
+import 'package:flutter_face_scan/features/face_capture/domain/entities/capture_actor_mode.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/capture_session.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/capture_snapshot.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/euler_angles.dart';
@@ -63,8 +64,16 @@ void main() {
         jsonDecode(await File(saved.manifestPath).readAsString())
             as Map<String, dynamic>;
     expect(manifest['id'], 'session_test');
-    expect(manifest['schemaVersion'], 3);
+    expect(manifest['schemaVersion'], 4);
     expect(manifest['expression'], 'neutral');
+    expect(manifest['captureActor'], 'user');
+    expect(manifest['practitionerFlow'], 'meshThenPhotos');
+    expect(manifest['meshMotion'], 'device');
+    expect(manifest['clinicianCamera'], 'front');
+    expect(manifest['rearCaptureKind'], 'still');
+    expect(manifest['stabilityProfile'], 'handheld');
+    expect(manifest['meshPass'], isA<Map<String, dynamic>>());
+    expect(manifest.containsKey('photoPass'), isFalse);
     final List<dynamic> poses = manifest['poses'] as List<dynamic>;
     expect(poses.length, 3);
     expect((poses.first as Map<String, dynamic>)['pose'], 'frontal');
@@ -187,6 +196,113 @@ void main() {
         jsonDecode(await File(saved.manifestPath).readAsString())
             as Map<String, dynamic>;
     expect(manifest['expression'], 'smile');
-    expect(manifest['schemaVersion'], 3);
+    expect(manifest['schemaVersion'], 4);
+  });
+
+  test('persists capture actor mode in the manifest', () async {
+    final FileSnapshotRepository repository = FileSnapshotRepository(
+      rootDirectory: tempDir,
+    );
+    final SavedSession saved = await repository.save(
+      CaptureSession(
+        id: 'session_clinician',
+        createdAt: DateTime(2026, 1, 1),
+        snapshots: <CaptureSnapshot>[snapshotFor(FacePose.frontal)],
+        actorMode: CaptureActorMode.practitioner,
+        practitionerFlow: PractitionerFlow.reuseMeshRef,
+        meshMotion: MeshMotionMode.head,
+        clinicianCamera: ClinicianCamera.rear,
+        rearCaptureKind: RearCaptureKind.video,
+      ),
+    );
+
+    final Map<String, dynamic> manifest =
+        jsonDecode(await File(saved.manifestPath).readAsString())
+            as Map<String, dynamic>;
+    expect(manifest['captureActor'], 'practitioner');
+    expect(manifest['practitionerFlow'], 'reuseMeshRef');
+    expect(manifest['meshMotion'], 'head');
+    expect(manifest['clinicianCamera'], 'rear');
+    expect(manifest['rearCaptureKind'], 'video');
+  });
+
+  test('persists meshRefSessionId for prior-mesh sessions', () async {
+    final FileSnapshotRepository repository = FileSnapshotRepository(
+      rootDirectory: tempDir,
+    );
+    final SavedSession saved = await repository.save(
+      CaptureSession(
+        id: 'session_prior',
+        createdAt: DateTime(2026, 1, 1),
+        snapshots: <CaptureSnapshot>[snapshotFor(FacePose.frontal)],
+        actorMode: CaptureActorMode.practitioner,
+        practitionerFlow: PractitionerFlow.reuseMeshRef,
+        meshRefSessionId: 'session_source',
+        clinicianCamera: ClinicianCamera.rear,
+      ),
+    );
+    final Map<String, dynamic> manifest =
+        jsonDecode(await File(saved.manifestPath).readAsString())
+            as Map<String, dynamic>;
+    expect(manifest['meshRefSessionId'], 'session_source');
+    expect(
+      (manifest['meshPass'] as Map<String, dynamic>)['refSessionId'],
+      'session_source',
+    );
+  });
+
+  test('writes rear enrichment JPEGs and photoPass in the manifest', () async {
+    final FileSnapshotRepository repository = FileSnapshotRepository(
+      rootDirectory: tempDir,
+    );
+    final StillCapture frontStill = StillCapture(
+      bytes: Uint8List.fromList(<int>[0xFF, 0xD8, 0xFF, 0xD9]),
+      width: 4,
+      height: 4,
+      viewMatrix: Matrix4.identity(),
+      projectionMatrix: Matrix4.identity(),
+      faceTransform: Matrix4.identity(),
+    );
+    final StillCapture rearStill = StillCapture(
+      bytes: Uint8List.fromList(<int>[0xFF, 0xD8, 0x00, 0xD9]),
+      width: 8,
+      height: 8,
+      viewMatrix: Matrix4.identity(),
+      projectionMatrix: Matrix4.identity(),
+      faceTransform: Matrix4.identity(),
+    );
+    final SavedSession saved = await repository.save(
+      CaptureSession(
+        id: 'session_mesh_rear',
+        createdAt: DateTime(2026, 1, 1),
+        snapshots: <CaptureSnapshot>[snapshotFor(FacePose.frontal)],
+        stills: <FacePose, StillCapture>{FacePose.frontal: frontStill},
+        rearStills: <FacePose, StillCapture>{FacePose.frontal: rearStill},
+        actorMode: CaptureActorMode.practitioner,
+        clinicianCamera: ClinicianCamera.rear,
+      ),
+    );
+
+    expect(
+      File('${saved.directoryPath}/frontal.jpg').existsSync(),
+      isTrue,
+    );
+    expect(
+      File('${saved.directoryPath}/frontal_rear.jpg').existsSync(),
+      isTrue,
+    );
+    final Map<String, dynamic> manifest =
+        jsonDecode(await File(saved.manifestPath).readAsString())
+            as Map<String, dynamic>;
+    expect(manifest['schemaVersion'], 4);
+    expect(manifest['photoPass'], isA<Map<String, dynamic>>());
+    expect(
+      (manifest['photoPass'] as Map<String, dynamic>)['camera'],
+      'rear',
+    );
+    expect(
+      (manifest['poses'] as List<dynamic>).first as Map<String, dynamic>,
+      containsPair('rearImageFile', 'frontal_rear.jpg'),
+    );
   });
 }

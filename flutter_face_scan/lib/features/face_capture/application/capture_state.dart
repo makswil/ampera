@@ -1,5 +1,6 @@
 import 'package:equatable/equatable.dart';
 
+import '../domain/entities/capture_actor_mode.dart';
 import '../domain/entities/capture_snapshot.dart';
 import '../domain/entities/expression_mode.dart';
 import '../domain/entities/face_pose.dart';
@@ -21,6 +22,11 @@ final class CaptureState extends Equatable {
     required this.holdProgress,
     required this.errorMessage,
     this.expressionMode = ExpressionMode.neutral,
+    this.actorMode = CaptureActorMode.user,
+    this.practitionerFlow = PractitionerFlow.meshThenPhotos,
+    this.meshMotion = MeshMotionMode.device,
+    this.clinicianCamera = ClinicianCamera.front,
+    this.rearCaptureKind = RearCaptureKind.still,
   });
 
   /// Initial, pre-start state.
@@ -32,7 +38,12 @@ final class CaptureState extends Equatable {
       lastValidation = null,
       holdProgress = 0,
       errorMessage = null,
-      expressionMode = ExpressionMode.neutral;
+      expressionMode = ExpressionMode.neutral,
+      actorMode = CaptureActorMode.user,
+      practitionerFlow = PractitionerFlow.meshThenPhotos,
+      meshMotion = MeshMotionMode.device,
+      clinicianCamera = ClinicianCamera.front,
+      rearCaptureKind = RearCaptureKind.still;
 
   final CaptureStatus status;
 
@@ -57,6 +68,21 @@ final class CaptureState extends Equatable {
   /// Expression selected for this run (also persisted on the session).
   final ExpressionMode expressionMode;
 
+  /// Who operates the device for this run.
+  final CaptureActorMode actorMode;
+
+  /// Clinician sub-flow for this run (meaningful when [actorMode] is practitioner).
+  final PractitionerFlow practitionerFlow;
+
+  /// Mesh-pass motion (head vs iPad).
+  final MeshMotionMode meshMotion;
+
+  /// Clinician photo camera for this run.
+  final ClinicianCamera clinicianCamera;
+
+  /// Rear capture kind for this run (photo vs video).
+  final RearCaptureKind rearCaptureKind;
+
   /// Overall session progress (captured poses / total poses).
   double get sessionProgress =>
       completedPoses.length / FacePose.captureSequence.length;
@@ -72,6 +98,11 @@ final class CaptureState extends Equatable {
     String? errorMessage,
     bool clearError = false,
     ExpressionMode? expressionMode,
+    CaptureActorMode? actorMode,
+    PractitionerFlow? practitionerFlow,
+    MeshMotionMode? meshMotion,
+    ClinicianCamera? clinicianCamera,
+    RearCaptureKind? rearCaptureKind,
   }) {
     return CaptureState(
       status: status ?? this.status,
@@ -82,6 +113,11 @@ final class CaptureState extends Equatable {
       holdProgress: holdProgress ?? this.holdProgress,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       expressionMode: expressionMode ?? this.expressionMode,
+      actorMode: actorMode ?? this.actorMode,
+      practitionerFlow: practitionerFlow ?? this.practitionerFlow,
+      meshMotion: meshMotion ?? this.meshMotion,
+      clinicianCamera: clinicianCamera ?? this.clinicianCamera,
+      rearCaptureKind: rearCaptureKind ?? this.rearCaptureKind,
     );
   }
 
@@ -95,5 +131,10 @@ final class CaptureState extends Equatable {
     holdProgress,
     errorMessage,
     expressionMode,
+    actorMode,
+    practitionerFlow,
+    meshMotion,
+    clinicianCamera,
+    rearCaptureKind,
   ];
 }

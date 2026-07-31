@@ -40,8 +40,11 @@ final class CaptureBloc extends Bloc<CaptureEvent, CaptureState> {
 
   final FaceTrackingService _trackingService;
   final PoseValidator _poseValidator;
-  final PoseTolerance _tolerance;
+  PoseTolerance _tolerance;
   final DateTime Function() _now;
+
+  /// Updates hold/grace (and related) thresholds without rebuilding the bloc.
+  set tolerance(PoseTolerance value) => _tolerance = value;
 
   StreamSubscription<FaceObservation>? _subscription;
 
@@ -82,6 +85,11 @@ final class CaptureBloc extends Bloc<CaptureEvent, CaptureState> {
         holdProgress: 0,
         errorMessage: null,
         expressionMode: event.expressionMode,
+        actorMode: event.actorMode,
+        practitionerFlow: event.practitionerFlow,
+        meshMotion: event.meshMotion,
+        clinicianCamera: event.clinicianCamera,
+        rearCaptureKind: event.rearCaptureKind,
       ),
     );
 

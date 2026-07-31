@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:vector_math/vector_math_64.dart';
 
+import '../domain/entities/capture_actor_mode.dart';
 import '../domain/entities/capture_session.dart';
 import '../domain/entities/capture_snapshot.dart';
 import '../domain/entities/euler_angles.dart';
@@ -13,12 +14,32 @@ import '../domain/entities/face_observation.dart';
 import '../domain/entities/face_pose.dart';
 import '../domain/entities/saved_session.dart';
 import '../domain/entities/still_capture.dart';
+import '../domain/value_objects/pose_tolerance.dart';
 
 /// Loads a previously saved session folder back into a [CaptureSession] so the
 /// in-app baker can re-bake without a new scan. Reads `manifest.json` + PLYs +
 /// JPEGs written by [FileSnapshotRepository.save].
 final class SessionFolderLoader {
   const SessionFolderLoader();
+
+  /// Load a session by folder id under `<documents>/face_scans/[id]/`.
+  Future<({CaptureSession session, SavedSession saved})?> loadById(
+    Directory documents,
+    String id,
+  ) {
+    return load(Directory('${documents.path}/face_scans/$id'));
+  }
+
+  /// Quick disk check: frontal mesh + bake stills present (no full parse).
+  static bool directoryLooksBakeable(Directory dir) {
+    if (!dir.existsSync()) {
+      return false;
+    }
+    return File('${dir.path}/frontal.ply').existsSync() &&
+        File('${dir.path}/frontal.jpg').existsSync() &&
+        File('${dir.path}/left40.jpg').existsSync() &&
+        File('${dir.path}/right40.jpg').existsSync();
+  }
 
   /// Newest session under `<documents>/face_scans/`, or null if none / unloadable.
   Future<({CaptureSession session, SavedSession saved})?> loadNewest(
@@ -70,6 +91,7 @@ final class SessionFolderLoader {
 
       final List<CaptureSnapshot> snapshots = <CaptureSnapshot>[];
       final Map<FacePose, StillCapture> stills = <FacePose, StillCapture>{};
+      final Map<FacePose, StillCapture> rearStills = <FacePose, StillCapture>{};
       final List<String> files = <String>[manifestFile.path];
 
       for (final dynamic raw in poseRaw) {
@@ -155,6 +177,26 @@ final class SessionFolderLoader {
             }
           }
         }
+
+        final String? rearImageName = poseMap['rearImageFile'] as String?;
+        if (rearImageName != null) {
+          final File rearFile = File('${dir.path}/$rearImageName');
+          if (rearFile.existsSync()) {
+            files.add(rearFile.path);
+            final Uint8List rearBytes = await rearFile.readAsBytes();
+            if (rearBytes.isNotEmpty) {
+              // Rear enrichment — matrices are not bake-valid; identity ok.
+              rearStills[pose] = StillCapture(
+                bytes: rearBytes,
+                width: 0,
+                height: 0,
+                viewMatrix: Matrix4.identity(),
+                projectionMatrix: Matrix4.identity(),
+                faceTransform: Matrix4.identity(),
+              );
+            }
+          }
+        }
       }
 
       // Need at least frontal + two sides with stills to bake.
@@ -175,8 +217,28 @@ final class SessionFolderLoader {
         createdAt: createdAt,
         snapshots: snapshots,
         stills: stills,
+        rearStills: rearStills,
         expression: ExpressionMode.fromName(
           manifest['expression'] as String?,
+        ),
+        actorMode: CaptureActorMode.fromName(
+          manifest['captureActor'] as String?,
+        ),
+        practitionerFlow: PractitionerFlow.fromName(
+          manifest['practitionerFlow'] as String?,
+        ),
+        meshMotion: MeshMotionMode.fromName(
+          manifest['meshMotion'] as String?,
+        ),
+        clinicianCamera: ClinicianCamera.fromName(
+          manifest['clinicianCamera'] as String?,
+        ),
+        rearCaptureKind: RearCaptureKind.fromName(
+          manifest['rearCaptureKind'] as String?,
+        ),
+        meshRefSessionId: manifest['meshRefSessionId'] as String?,
+        stabilityProfile: CaptureStabilityProfile.fromName(
+          manifest['stabilityProfile'] as String?,
         ),
       );
       final SavedSession saved = SavedSession(

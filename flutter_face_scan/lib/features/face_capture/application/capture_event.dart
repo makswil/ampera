@@ -1,5 +1,6 @@
 import 'package:equatable/equatable.dart';
 
+import '../domain/entities/capture_actor_mode.dart';
 import '../domain/entities/expression_mode.dart';
 import '../domain/entities/face_observation.dart';
 
@@ -13,13 +14,42 @@ sealed class CaptureEvent extends Equatable {
 
 /// User starts (or restarts) the guided capture; subscribes to the tracker.
 final class CaptureStarted extends CaptureEvent {
-  const CaptureStarted({this.expressionMode = ExpressionMode.neutral});
+  const CaptureStarted({
+    this.expressionMode = ExpressionMode.neutral,
+    this.actorMode = CaptureActorMode.user,
+    this.practitionerFlow = PractitionerFlow.meshThenPhotos,
+    this.meshMotion = MeshMotionMode.device,
+    this.clinicianCamera = ClinicianCamera.front,
+    this.rearCaptureKind = RearCaptureKind.still,
+  });
 
   /// Facial expression to gate during this run.
   final ExpressionMode expressionMode;
 
+  /// Who operates the device (patient vs clinician).
+  final CaptureActorMode actorMode;
+
+  /// Clinician sub-flow; ignored when [actorMode] is [CaptureActorMode.user].
+  final PractitionerFlow practitionerFlow;
+
+  /// Mesh-pass motion; ignored unless clinician + mesh now.
+  final MeshMotionMode meshMotion;
+
+  /// Clinician photo camera; ignored for user scans.
+  final ClinicianCamera clinicianCamera;
+
+  /// Rear photo vs video; ignored unless clinician + rear.
+  final RearCaptureKind rearCaptureKind;
+
   @override
-  List<Object?> get props => <Object?>[expressionMode];
+  List<Object?> get props => <Object?>[
+    expressionMode,
+    actorMode,
+    practitionerFlow,
+    meshMotion,
+    clinicianCamera,
+    rearCaptureKind,
+  ];
 }
 
 /// User aborts / leaves; tears down the AR session.

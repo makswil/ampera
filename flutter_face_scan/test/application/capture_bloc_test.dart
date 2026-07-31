@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_face_scan/features/face_capture/application/capture_bloc.dart';
 import 'package:flutter_face_scan/features/face_capture/application/capture_event.dart';
 import 'package:flutter_face_scan/features/face_capture/application/capture_status.dart';
+import 'package:flutter_face_scan/features/face_capture/domain/entities/capture_actor_mode.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/euler_angles.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/expression_mode.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/face_observation.dart';
@@ -183,6 +184,28 @@ void main() {
     await _settle();
 
     expect(bloc.state.expressionMode, ExpressionMode.smile);
+    await bloc.close();
+  });
+
+  test('stores actor mode and camera options from CaptureStarted', () async {
+    final CaptureBloc bloc = buildBloc(_ScriptedValidator(true));
+
+    bloc.add(
+      const CaptureStarted(
+        actorMode: CaptureActorMode.practitioner,
+        practitionerFlow: PractitionerFlow.reuseMeshRef,
+        meshMotion: MeshMotionMode.head,
+        clinicianCamera: ClinicianCamera.rear,
+        rearCaptureKind: RearCaptureKind.video,
+      ),
+    );
+    await _settle();
+
+    expect(bloc.state.actorMode, CaptureActorMode.practitioner);
+    expect(bloc.state.practitionerFlow, PractitionerFlow.reuseMeshRef);
+    expect(bloc.state.meshMotion, MeshMotionMode.head);
+    expect(bloc.state.clinicianCamera, ClinicianCamera.rear);
+    expect(bloc.state.rearCaptureKind, RearCaptureKind.video);
     await bloc.close();
   });
 }

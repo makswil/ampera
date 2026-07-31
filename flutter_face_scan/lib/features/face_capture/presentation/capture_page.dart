@@ -13,9 +13,13 @@ import '../application/capture_status.dart';
 import '../data/arkit_face_tracking_service.dart';
 import '../data/bake/session_baker.dart';
 import '../data/file_snapshot_repository.dart';
+import '../data/rear_face_tracking_service.dart';
 import '../data/session_folder_loader.dart';
+import '../data/tracking_backend_router.dart';
 import '../domain/constants/face_vertex_indices.dart';
+import '../domain/entities/capture_actor_mode.dart';
 import '../domain/entities/capture_session.dart';
+import '../domain/entities/capture_snapshot.dart';
 import '../domain/entities/expression_mode.dart';
 import '../domain/entities/face_pose.dart';
 import '../domain/entities/saved_session.dart';
@@ -49,7 +53,7 @@ class CapturePage extends StatefulWidget {
 }
 
 class _CapturePageState extends State<CapturePage> {
-  late final ArkitFaceTrackingService _trackingService;
+  late final TrackingBackendRouter _trackingService;
   late final CaptureBloc _bloc;
   late final GuidedPoseValidator _guidedValidator;
   late final ExpressionAwarePoseValidator _poseValidator;
@@ -58,6 +62,23 @@ class _CapturePageState extends State<CapturePage> {
 
   /// Expression chosen in the idle picker; applied on the next Start.
   ExpressionMode _selectedExpression = ExpressionMode.neutral;
+
+  bool get _wantsRearPhoto =>
+      _debug.actorMode == CaptureActorMode.practitioner &&
+      _debug.clinicianCamera == ClinicianCamera.rear;
+
+  bool get _wantsRearVideo =>
+      _wantsRearPhoto && _debug.rearCaptureKind == RearCaptureKind.video;
+
+  /// Clinician · Mesh now · Rear → front mesh pass, then rear photo/video.
+  bool get _wantsSequentialMeshThenRear =>
+      _wantsRearPhoto &&
+      _debug.practitionerFlow == PractitionerFlow.meshThenPhotos;
+
+  /// Clinician · Prior mesh → photo-only; mesh loaded from a saved session.
+  bool get _wantsPriorMeshPhotoOnly =>
+      _debug.actorMode == CaptureActorMode.practitioner &&
+      _debug.practitionerFlow == PractitionerFlow.reuseMeshRef;
 
   bool _saving = false;
   /// True after the current capture run was written to disk (one-shot).
@@ -73,7 +94,17 @@ class _CapturePageState extends State<CapturePage> {
   /// Paths of the last baked model (obj/mtl/png), for the share sheet.
   BakedTexture? _baked;
 
+  /// Active sequential pass; null for single-pass runs / idle.
+  CapturePass? _sequentialPass;
+
+  /// Mesh-pass snapshots stashed before the rear photo pass restarts the bloc.
+  List<CaptureSnapshot>? _meshSnapshots;
+
+  /// Front bake stills from the mesh pass (paired with [_meshSnapshots]).
+  final Map<FacePose, StillCapture> _meshStills = <FacePose, StillCapture>{};
+
   /// One RGB still + projection per pose, grabbed as each pose completes.
+  /// During the photo pass these are rear enrichment frames.
   final Map<FacePose, StillCapture> _stills = <FacePose, StillCapture>{};
   int _lastCompletedCount = 0;
 
@@ -93,9 +124,12 @@ class _CapturePageState extends State<CapturePage> {
   Future<void> _stillChain = Future<void>.value();
 
   Future<void> _grabStill(FacePose pose) async {
+    final bool meshPassHiRes = _sequentialPass == CapturePass.mesh;
     final StillCapture? still = await _trackingService.captureStill(
-      hiRes: _debug.hiResPhoto,
+      hiRes: _debug.hiResPhoto || _trackingService.isRear || meshPassHiRes,
       lockAeAwb: _debug.lockAeAwb,
+      preferHarvestedVideoFrame: _wantsRearVideo &&
+          (_sequentialPass == CapturePass.photo || _meshSnapshots != null),
     );
     if (still != null && still.bytes.isNotEmpty) {
       _stills[pose] = still;
@@ -104,7 +138,7 @@ class _CapturePageState extends State<CapturePage> {
 
   Future<void> _capturePoseStill(FacePose pose) async {
     Uint8List? freeze;
-    if (_debug.hiResPhoto) {
+    if (_debug.hiResPhoto || _trackingService.isRear) {
       freeze = await _trackingService.previewFreeze();
     }
     if (!mounted) {
@@ -115,16 +149,18 @@ class _CapturePageState extends State<CapturePage> {
       _previewFreeze = freeze;
       _freezeOpaque = freeze != null;
     });
-    _triggerPoseCapturedFeedback(_bloc.state.completedPoses.length);
+    final int capturedCount = _bloc.state.completedPoses.length;
     await _grabStill(pose);
     await Future<void>.delayed(const Duration(milliseconds: 120));
     if (!mounted) {
       return;
     }
+    // Cue with freeze dissolve — not at freeze start (felt like “done” while still frozen).
     setState(() {
       _freezeOpaque = false;
       _awaitingStill = false;
     });
+    _triggerPoseCapturedFeedback(capturedCount);
     if (_previewFreeze != null) {
       await Future<void>.delayed(const Duration(milliseconds: 340));
       if (mounted) {
@@ -137,23 +173,117 @@ class _CapturePageState extends State<CapturePage> {
   Future<void> _finishSession(CaptureState state) async {
     await _stillChain;
     await _persist(state);
+    _clearSequentialStash();
+    await _syncIdlePreview();
+  }
+
+  /// After mesh pass: keep front mesh+stills, switch to rear, restart poses.
+  Future<void> _handoffMeshToPhotoPass(CaptureState meshState) async {
+    await _stillChain;
+    if (!mounted || _sequentialPass != CapturePass.mesh) {
+      return;
+    }
+    _meshSnapshots = List<CaptureSnapshot>.of(meshState.snapshots);
+    _meshStills
+      ..clear()
+      ..addAll(_stills);
+    setState(() {
+      _stills.clear();
+      _stillChain = Future<void>.value();
+      _lastCompletedCount = 0;
+      _sequentialPass = CapturePass.photo;
+      _captureBanner = 'Mesh done — rear photos';
+      _awaitingStill = true;
+      _previewFreeze = null;
+      _freezeOpaque = false;
+    });
+    _bannerTimer?.cancel();
+    _bannerTimer = Timer(const Duration(milliseconds: 2200), () {
+      if (mounted) {
+        setState(() => _captureBanner = null);
+      }
+    });
+    try {
+      await _trackingService.select(TrackingBackend.rear);
+      if (mounted) {
+        setState(() {});
+      }
+      await _trackingService.setRearPreferVideo(_wantsRearVideo);
+      if (_wantsRearVideo) {
+        await _trackingService.beginRearHarvest(
+          lockAeAwb: _debug.lockAeAwb,
+        );
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() => _awaitingStill = false);
+      _bloc.add(
+        CaptureStarted(
+          expressionMode: ExpressionMode.neutral,
+          actorMode: CaptureActorMode.practitioner,
+          practitionerFlow: _debug.practitionerFlow,
+          meshMotion: _debug.meshMotion,
+          clinicianCamera: ClinicianCamera.rear,
+          rearCaptureKind: _debug.rearCaptureKind,
+        ),
+      );
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _clearSequentialStash();
+      _bloc.add(CaptureFailed('Photo pass failed: $error'));
+    }
+  }
+
+  void _clearSequentialStash() {
+    _sequentialPass = null;
+    _meshSnapshots = null;
+    _meshStills.clear();
+  }
+
+  TrackingBackend get _wantedIdleBackend =>
+      _wantsRearPhoto ? TrackingBackend.rear : TrackingBackend.front;
+
+  /// Idle preview matches settings (front TrueDepth vs rear wide).
+  Future<void> _syncIdlePreview() async {
+    final TrackingBackend wanted = _wantedIdleBackend;
+    try {
+      if (_trackingService.backend != wanted) {
+        await _trackingService.select(wanted);
+        if (mounted) {
+          setState(() {});
+        }
+      }
+      // Idle stays on photo preset; 4K video harvest engages only on Start.
+      if (wanted == TrackingBackend.rear) {
+        await _trackingService.setRearPreferVideo(false);
+      }
+      await _trackingService.start();
+    } on Object {
+      // Preview may recover on next Start / settings change.
+    }
   }
 
   @override
   void initState() {
     super.initState();
-    _trackingService = ArkitFaceTrackingService();
+    _trackingService = TrackingBackendRouter(
+      front: ArkitFaceTrackingService(),
+      rear: RearFaceTrackingService(),
+    );
     const SymmetryAxisExtractor extractor = LeastSquaresSymmetryAxisExtractor();
     _guidedValidator = GuidedPoseValidator(axisExtractor: extractor);
     _poseValidator = ExpressionAwarePoseValidator(inner: _guidedValidator);
-    _syncDistanceTolerance();
     _bloc = CaptureBloc(
       trackingService: _trackingService,
       poseValidator: _poseValidator,
     );
+    _syncDistanceTolerance();
 
     // Live preview immediately; Start only begins guided capture / saving.
-    unawaited(_startPreview());
+    unawaited(_syncIdlePreview());
 
     // Re-push the overlay config whenever a debug toggle changes.
     _debug.addListener(_onDebugChanged);
@@ -161,12 +291,27 @@ class _CapturePageState extends State<CapturePage> {
     unawaited(_loadNewestSession());
   }
 
-  /// Boots the native AR session for the camera view without capturing frames.
-  Future<void> _startPreview() async {
-    try {
-      await _trackingService.start();
-    } on Object {
-      // Permission / hardware failures surface when the user taps Start.
+  Future<void> _prepareBackendForStart() async {
+    // Sequential mesh→rear always begins on front TrueDepth.
+    final TrackingBackend wanted = _wantsSequentialMeshThenRear
+        ? TrackingBackend.front
+        : _wantedIdleBackend;
+    if (_trackingService.backend != wanted) {
+      await _trackingService.select(wanted);
+      if (mounted) {
+        setState(() {});
+      }
+    }
+    if (wanted == TrackingBackend.rear) {
+      // Idle preview uses photo preset; video scan switches to 4K harvest mode.
+      await _trackingService.setRearPreferVideo(_wantsRearVideo);
+      if (_wantsRearVideo) {
+        await _trackingService.beginRearHarvest(
+          lockAeAwb: _debug.lockAeAwb,
+        );
+      }
+    } else {
+      await _trackingService.setRearPreferVideo(false);
     }
   }
 
@@ -195,17 +340,32 @@ class _CapturePageState extends State<CapturePage> {
   void _onDebugChanged() {
     _syncDistanceTolerance();
     _applyOverlay();
-    // Face-frame oval + slider label rebuild.
+    final CaptureStatus status = _bloc.state.status;
+    // Any settings tweak leaves the completed/"Scan again" surface and aborts
+    // an in-flight scan so the next action is a clean Start.
+    if (status == CaptureStatus.capturing ||
+        status == CaptureStatus.completed ||
+        status == CaptureStatus.error) {
+      _resetCaptureUiToIdle(playCancelFeedback: status == CaptureStatus.capturing);
+    }
+    // Camera switch only when Front/Rear (or operator) selection changed —
+    // not on every distance/HUD slider tick.
+    if (_trackingService.backend != _wantedIdleBackend) {
+      unawaited(_syncIdlePreview());
+    }
     if (mounted) {
       setState(() {});
     }
   }
 
-  /// Pushes the debug slider's target distance into the live pose validator.
+  /// Pushes stability profile + face distance into validator and bloc hold timing.
   void _syncDistanceTolerance() {
-    _guidedValidator.tolerance = PoseTolerance(
+    final PoseTolerance tolerance = PoseTolerance.forProfile(
+      _debug.stabilityProfile,
       targetDistanceMeters: _debug.targetDistanceMeters,
     );
+    _guidedValidator.tolerance = tolerance;
+    _bloc.tolerance = tolerance;
   }
 
   /// Hands the Dart-owned axis index table to native (required for the 2D
@@ -236,8 +396,40 @@ class _CapturePageState extends State<CapturePage> {
     if (!mounted) {
       return;
     }
+    if (_wantsPriorMeshPhotoOnly) {
+      final bool ready = await _preparePriorMeshRef();
+      if (!ready || !mounted) {
+        return;
+      }
+    }
+    await _prepareBackendForStart();
+    if (!mounted) {
+      return;
+    }
+    if (!_wantsPriorMeshPhotoOnly) {
+      _clearSequentialStash();
+    }
+    if (_wantsSequentialMeshThenRear) {
+      _sequentialPass = CapturePass.mesh;
+    }
+    // Rear Vision has no blendshapes — smile gate would block forever.
+    // Mesh pass of a sequential run uses front TrueDepth (smile OK).
+    final bool photoOnlyPass =
+        _sequentialPass == CapturePass.photo ||
+        (_wantsRearPhoto && _sequentialPass != CapturePass.mesh);
+    final ExpressionMode expression =
+        photoOnlyPass ? ExpressionMode.neutral : _selectedExpression;
+    // Mesh pass guidance uses front camera semantics even when photos are rear.
+    final ClinicianCamera startCamera = _sequentialPass == CapturePass.mesh
+        ? ClinicianCamera.front
+        : _debug.clinicianCamera;
     final CaptureStarted start = CaptureStarted(
-      expressionMode: _selectedExpression,
+      expressionMode: expression,
+      actorMode: _debug.actorMode,
+      practitionerFlow: _debug.practitionerFlow,
+      meshMotion: _debug.meshMotion,
+      clinicianCamera: startCamera,
+      rearCaptureKind: _debug.rearCaptureKind,
     );
     if (!seen) {
       await _trackingService.dismissPresented();
@@ -246,6 +438,12 @@ class _CapturePageState extends State<CapturePage> {
       }
       final bool? started = await showScanOnboardingSheet(
         context,
+        actorMode: guidanceActorMode(
+          actorMode: _debug.actorMode,
+          practitionerFlow: _debug.practitionerFlow,
+          meshMotion: _debug.meshMotion,
+          clinicianCamera: _debug.clinicianCamera,
+        ),
         onStart: () {
           unawaited(OnboardingStore.markSeen());
           _bloc.add(start);
@@ -269,6 +467,12 @@ class _CapturePageState extends State<CapturePage> {
       }
       await showScanOnboardingSheet(
         context,
+        actorMode: guidanceActorMode(
+          actorMode: _debug.actorMode,
+          practitionerFlow: _debug.practitionerFlow,
+          meshMotion: _debug.meshMotion,
+          clinicianCamera: _debug.clinicianCamera,
+        ),
         onStart: () {},
         showStartButton: false,
       );
@@ -285,8 +489,69 @@ class _CapturePageState extends State<CapturePage> {
     );
   }
 
+  /// Loads a bakeable prior mesh into the sequential stash for a photo-only run.
+  Future<bool> _preparePriorMeshRef() async {
+    final String? id = _debug.meshRefSessionId;
+    if (id == null || id.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Choose a prior mesh scan in Settings')),
+        );
+      }
+      return false;
+    }
+    try {
+      final Directory documents = await getApplicationDocumentsDirectory();
+      final ({CaptureSession session, SavedSession saved})? loaded =
+          await const SessionFolderLoader().loadById(documents, id);
+      if (!mounted) {
+        return false;
+      }
+      if (loaded == null || !loaded.session.hasBakeableMesh) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Prior mesh scan has no bakeable mesh')),
+        );
+        return false;
+      }
+      _clearSequentialStash();
+      _meshSnapshots = List<CaptureSnapshot>.of(loaded.session.snapshots);
+      _meshStills
+        ..clear()
+        ..addAll(loaded.session.stills);
+      _sequentialPass = CapturePass.photo;
+      return true;
+    } on Object {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not load prior mesh scan')),
+        );
+      }
+      return false;
+    }
+  }
+
+  Future<void> _pickPriorMeshScan() async {
+    await _trackingService.dismissPresented();
+    if (!mounted) {
+      return;
+    }
+    final String? id = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (_) => const ScansManagerPage(pickMode: true),
+      ),
+    );
+    if (id != null) {
+      _debug.meshRefSessionId = id;
+    }
+    unawaited(_syncIdlePreview());
+  }
+
   /// Settings sheet (appearance, distance, dev toggles). Help is `?`.
   void _openSettings() {
+    if (_bloc.state.status == CaptureStatus.capturing) {
+      _resetCaptureUiToIdle(playCancelFeedback: true);
+      unawaited(_syncIdlePreview());
+    }
     unawaited(_openSettingsPage(
       title: 'Settings',
       buildChildren: () {
@@ -323,6 +588,100 @@ class _CapturePageState extends State<CapturePage> {
               ],
             ),
             onTap: () => _theme.setDark(!dark),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            title: const Text('Scan operator'),
+            trailing: _SettingsSegmented<CaptureActorMode>(
+              values: CaptureActorMode.values,
+              selected: _debug.actorMode,
+              labelOf: (CaptureActorMode m) => m.label,
+              onChanged: (CaptureActorMode m) => _debug.actorMode = m,
+            ),
+          ),
+          if (_debug.actorMode == CaptureActorMode.practitioner) ...<Widget>[
+            ListTile(
+              title: const Text('Mesh source'),
+              trailing: _SettingsSegmented<PractitionerFlow>(
+                values: PractitionerFlow.values,
+                selected: _debug.practitionerFlow,
+                labelOf: (PractitionerFlow f) => f.label,
+                onChanged: (PractitionerFlow f) => _debug.practitionerFlow = f,
+              ),
+            ),
+            if (_debug.practitionerFlow == PractitionerFlow.reuseMeshRef)
+              ListTile(
+                title: const Text('Prior mesh scan'),
+                subtitle: Text(
+                  _debug.meshRefSessionId ?? 'Tap to choose from saved scans',
+                ),
+                trailing: const Icon(Icons.folder_open),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  unawaited(_pickPriorMeshScan());
+                },
+              ),
+            if (_debug.practitionerFlow == PractitionerFlow.meshThenPhotos)
+              ListTile(
+                title: const Text('Mesh motion'),
+                subtitle: _debug.meshMotion == MeshMotionMode.head
+                    ? const Text('Patient turns head · device still')
+                    : const Text('You orbit iPad · patient still'),
+                trailing: _SettingsSegmented<MeshMotionMode>(
+                  values: MeshMotionMode.values,
+                  selected: _debug.meshMotion,
+                  labelOf: (MeshMotionMode m) => m.label,
+                  onChanged: (MeshMotionMode m) => _debug.meshMotion = m,
+                ),
+              ),
+            ListTile(
+              title: const Text('Photo camera'),
+              subtitle: _debug.clinicianCamera == ClinicianCamera.rear
+                  ? Text(
+                      _debug.practitionerFlow ==
+                              PractitionerFlow.meshThenPhotos
+                          ? 'Mesh then rear · bake from front'
+                          : _debug.practitionerFlow ==
+                                  PractitionerFlow.reuseMeshRef
+                              ? 'Prior mesh · rear enrichment'
+                              : 'Vision guide · no mesh bake',
+                    )
+                  : _debug.practitionerFlow == PractitionerFlow.reuseMeshRef
+                      ? const Text('Prior mesh · new photos as enrichment')
+                      : null,
+              trailing: _SettingsSegmented<ClinicianCamera>(
+                values: ClinicianCamera.values,
+                selected: _debug.clinicianCamera,
+                labelOf: (ClinicianCamera c) => c.label,
+                onChanged: (ClinicianCamera c) => _debug.clinicianCamera = c,
+              ),
+            ),
+            if (_debug.clinicianCamera == ClinicianCamera.rear)
+              ListTile(
+                title: const Text('Rear capture'),
+                subtitle: _debug.rearCaptureKind == RearCaptureKind.video
+                    ? const Text('Best sharp frame per angle')
+                    : const Text('Full-res photo per angle'),
+                trailing: _SettingsSegmented<RearCaptureKind>(
+                  values: RearCaptureKind.values,
+                  selected: _debug.rearCaptureKind,
+                  labelOf: (RearCaptureKind k) => k.label,
+                  onChanged: (RearCaptureKind k) => _debug.rearCaptureKind = k,
+                ),
+              ),
+          ],
+          ListTile(
+            title: const Text('Stability'),
+            subtitle: _debug.stabilityProfile == CaptureStabilityProfile.tripod
+                ? const Text('Tighter angles · ~1.2 s hold')
+                : const Text('Forgiving · ~2.5 s hold'),
+            trailing: _SettingsSegmented<CaptureStabilityProfile>(
+              values: CaptureStabilityProfile.values,
+              selected: _debug.stabilityProfile,
+              labelOf: (CaptureStabilityProfile p) => p.label,
+              onChanged: (CaptureStabilityProfile p) =>
+                  _debug.stabilityProfile = p,
+            ),
           ),
           const Divider(height: 1),
           ListTile(
@@ -365,15 +724,13 @@ class _CapturePageState extends State<CapturePage> {
           ),
           SwitchListTile(
             title: const Text('Lock AE/AWB after first shot'),
-            subtitle: Text(
-              _debug.hiResPhoto
-                  ? 'On = reuse ISO/shutter/WB from the first hi-res pose '
-                      '(usually frontal). Off = auto per pose.'
-                  : 'Enable AVCapture hi-res first.',
+            subtitle: const Text(
+              'On = reuse ISO/shutter/WB from the first pose of each '
+              'camera pass (front hi-res + rear photo/video). '
+              'Off = auto per pose.',
             ),
             value: _debug.lockAeAwb,
-            onChanged:
-                _debug.hiResPhoto ? (bool v) => _debug.lockAeAwb = v : null,
+            onChanged: (bool v) => _debug.lockAeAwb = v,
           ),
         ];
       },
@@ -613,9 +970,21 @@ class _CapturePageState extends State<CapturePage> {
 
   /// Persists the captured snapshots once the session completes (one-shot).
   Future<void> _persist(CaptureState state) async {
-    if (_saving || _didPersistCurrent || state.snapshots.isEmpty) {
+    if (_saving || _didPersistCurrent) {
       return;
     }
+    final List<CaptureSnapshot> snapshots =
+        _meshSnapshots ?? state.snapshots;
+    if (snapshots.isEmpty) {
+      return;
+    }
+    // Bake stills = mesh-pass front; rear enrichment lives in rearStills.
+    final Map<FacePose, StillCapture> bakeStills = _meshStills.isNotEmpty
+        ? Map<FacePose, StillCapture>.of(_meshStills)
+        : Map<FacePose, StillCapture>.of(_stills);
+    final Map<FacePose, StillCapture> rearStills = _meshSnapshots != null
+        ? Map<FacePose, StillCapture>.of(_stills)
+        : const <FacePose, StillCapture>{};
     setState(() => _saving = true);
     try {
       final Directory documents = await getApplicationDocumentsDirectory();
@@ -625,9 +994,21 @@ class _CapturePageState extends State<CapturePage> {
       final CaptureSession session = CaptureSession(
         id: 'session_${DateTime.now().millisecondsSinceEpoch}',
         createdAt: DateTime.now(),
-        snapshots: state.snapshots,
-        stills: Map<FacePose, StillCapture>.of(_stills),
+        snapshots: snapshots,
+        stills: bakeStills,
+        rearStills: rearStills,
         expression: state.expressionMode,
+        actorMode: state.actorMode,
+        practitionerFlow: state.practitionerFlow,
+        meshMotion: state.meshMotion,
+        // Persist the clinic photo-camera intent from settings (rear), not the
+        // mesh-pass front override used for guidance.
+        clinicianCamera: _debug.clinicianCamera,
+        rearCaptureKind: state.rearCaptureKind,
+        meshRefSessionId: _debug.practitionerFlow == PractitionerFlow.reuseMeshRef
+            ? _debug.meshRefSessionId
+            : null,
+        stabilityProfile: _debug.stabilityProfile,
       );
       final SavedSession saved = await repository.save(session);
       _lastSession = session;
@@ -767,7 +1148,15 @@ class _CapturePageState extends State<CapturePage> {
         createdAt: session.createdAt,
         snapshots: session.snapshots,
         stills: stills,
+        rearStills: session.rearStills,
         expression: session.expression,
+        actorMode: session.actorMode,
+        practitionerFlow: session.practitionerFlow,
+        meshMotion: session.meshMotion,
+        clinicianCamera: session.clinicianCamera,
+        rearCaptureKind: session.rearCaptureKind,
+        meshRefSessionId: session.meshRefSessionId,
+        stabilityProfile: session.stabilityProfile,
       ),
       note: 'ml-wb OK → ${result.targetKelvin.round()} K ($mode)$timing',
     );
@@ -775,10 +1164,20 @@ class _CapturePageState extends State<CapturePage> {
 
   /// Cancels the running scan back to idle and discards the partial captures.
   void _cancelScan() {
-    CaptureFeedback.cancelled();
+    _resetCaptureUiToIdle(playCancelFeedback: true);
+    unawaited(_syncIdlePreview());
+  }
+
+  void _resetCaptureUiToIdle({required bool playCancelFeedback}) {
+    if (playCancelFeedback) {
+      CaptureFeedback.cancelled();
+    }
     CaptureFeedback.reset();
     _bannerTimer?.cancel();
-    _bloc.add(const CaptureStopped());
+    if (_bloc.state.status != CaptureStatus.idle) {
+      _bloc.add(const CaptureStopped());
+    }
+    _clearSequentialStash();
     setState(() {
       _stills.clear();
       _stillChain = Future<void>.value();
@@ -793,12 +1192,13 @@ class _CapturePageState extends State<CapturePage> {
   void _triggerPoseCapturedFeedback(int capturedCount) {
     CaptureFeedback.poseCaptured();
     _bannerTimer?.cancel();
-    setState(() {
-      _captureBanner = PoseGuidanceCopy.capturedProgress(
-        capturedCount,
-        FacePose.captureSequence.length,
-      );
-    });
+    final int total = FacePose.captureSequence.length;
+    final String banner = switch (_sequentialPass) {
+      CapturePass.mesh => 'Mesh · $capturedCount of $total',
+      CapturePass.photo => 'Photos · $capturedCount of $total',
+      null => PoseGuidanceCopy.capturedProgress(capturedCount, total),
+    };
+    setState(() => _captureBanner = banner);
     _bannerTimer = Timer(const Duration(milliseconds: 1600), () {
       if (mounted) {
         setState(() => _captureBanner = null);
@@ -842,8 +1242,16 @@ class _CapturePageState extends State<CapturePage> {
               _lastCompletedCount = state.completedPoses.length;
 
               if (state.status == CaptureStatus.completed) {
-                CaptureFeedback.scanCompleted();
-                unawaited(_finishSession(state));
+                if (_sequentialPass == CapturePass.mesh) {
+                  // First pass done — hand off to rear without persisting yet.
+                  unawaited(_handoffMeshToPhotoPass(state));
+                } else {
+                  CaptureFeedback.scanCompleted();
+                  unawaited(_finishSession(state));
+                }
+              } else if (state.status == CaptureStatus.error) {
+                _clearSequentialStash();
+                unawaited(_syncIdlePreview());
               } else if (state.status == CaptureStatus.capturing &&
                   state.completedPoses.isEmpty &&
                   (_stills.isNotEmpty || _didPersistCurrent)) {
@@ -892,7 +1300,11 @@ class _CapturePageState extends State<CapturePage> {
           body: Stack(
             fit: StackFit.expand,
             children: <Widget>[
-              const UiKitView(viewType: CapturePage.previewViewType),
+              UiKitView(
+                viewType: _trackingService.isRear
+                    ? RearFaceTrackingService.previewViewType
+                    : CapturePage.previewViewType,
+              ),
               if (_previewFreeze != null)
                 IgnorePointer(
                   child: AnimatedOpacity(
@@ -925,6 +1337,12 @@ class _CapturePageState extends State<CapturePage> {
                   onExpressionChanged: (ExpressionMode mode) {
                     setState(() => _selectedExpression = mode);
                   },
+                  selectedActorMode: _debug.actorMode,
+                  selectedPractitionerFlow: _debug.practitionerFlow,
+                  selectedMeshMotion: _debug.meshMotion,
+                  selectedClinicianCamera: _debug.clinicianCamera,
+                  selectedRearCaptureKind: _debug.rearCaptureKind,
+                  activeCapturePass: _sequentialPass,
                 ),
               ),
               // Calibration HUD — visibility is a runtime debug toggle.
@@ -1045,10 +1463,61 @@ class _CapturePageState extends State<CapturePage> {
       return 'Saving…';
     }
     if (_didPersistCurrent && !_baking) {
+      final CaptureSession? s = _lastSession;
+      if (s != null && s.rearStills.isNotEmpty && s.hasBakeableMesh) {
+        return 'Saved · mesh + rear · bake ready';
+      }
       return 'Saved on this device';
+    }
+    if (_sequentialPass == CapturePass.mesh) {
+      return 'Pass 1/2 · mesh';
+    }
+    if (_sequentialPass == CapturePass.photo) {
+      return _wantsPriorMeshPhotoOnly
+          ? 'Photos · prior mesh'
+          : 'Pass 2/2 · rear';
     }
     // Bake / ml-wb timing stays in the bake sheet + console — not on the
     // consumer guidance surface.
     return null;
+  }
+}
+
+/// Compact trailing segmented control for settings rows.
+class _SettingsSegmented<T extends Object> extends StatelessWidget {
+  const _SettingsSegmented({
+    required this.values,
+    required this.selected,
+    required this.labelOf,
+    required this.onChanged,
+  });
+
+  final List<T> values;
+  final T selected;
+  final String Function(T) labelOf;
+  final ValueChanged<T> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return SegmentedButton<T>(
+      style: const ButtonStyle(
+        visualDensity: VisualDensity.compact,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      showSelectedIcon: false,
+      segments: <ButtonSegment<T>>[
+        for (final T value in values)
+          ButtonSegment<T>(
+            value: value,
+            label: Text(labelOf(value), style: const TextStyle(fontSize: 12)),
+          ),
+      ],
+      selected: <T>{selected},
+      onSelectionChanged: (Set<T> next) {
+        if (next.isNotEmpty) {
+          onChanged(next.first);
+        }
+      },
+    );
   }
 }

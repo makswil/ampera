@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../application/capture_state.dart';
 import '../../application/capture_status.dart';
+import '../../domain/entities/capture_actor_mode.dart';
 import '../../domain/entities/expression_mode.dart';
 import '../../domain/entities/face_pose.dart';
 import '../../domain/entities/pose_guidance.dart';
@@ -25,6 +26,12 @@ class CaptureOverlay extends StatelessWidget {
     this.deferPoseGuidance = false,
     this.selectedExpression = ExpressionMode.neutral,
     this.onExpressionChanged,
+    this.selectedActorMode = CaptureActorMode.user,
+    this.selectedPractitionerFlow = PractitionerFlow.meshThenPhotos,
+    this.selectedMeshMotion = MeshMotionMode.device,
+    this.selectedClinicianCamera = ClinicianCamera.front,
+    this.selectedRearCaptureKind = RearCaptureKind.still,
+    this.activeCapturePass,
     super.key,
   });
 
@@ -44,6 +51,24 @@ class CaptureOverlay extends StatelessWidget {
 
   /// Called when the user picks a different expression before Start.
   final ValueChanged<ExpressionMode>? onExpressionChanged;
+
+  /// Actor mode from settings (idle copy only).
+  final CaptureActorMode selectedActorMode;
+
+  /// Clinician mesh-source flow from settings (idle + guidance).
+  final PractitionerFlow selectedPractitionerFlow;
+
+  /// Mesh-pass motion from settings (idle + guidance).
+  final MeshMotionMode selectedMeshMotion;
+
+  /// Clinician camera from settings (idle copy).
+  final ClinicianCamera selectedClinicianCamera;
+
+  /// Rear capture kind from settings (idle copy).
+  final RearCaptureKind selectedRearCaptureKind;
+
+  /// Active sequential pass (mesh→photo); null for single-pass runs.
+  final CapturePass? activeCapturePass;
 
   static PoseGuidance? primaryGuidance(CaptureState state) {
     final List<PoseGuidance>? guidance = state.lastValidation?.guidance;
@@ -125,6 +150,12 @@ class CaptureOverlay extends StatelessWidget {
                       deferPoseGuidance: deferPoseGuidance,
                       statusLine: inCaptureChrome ? null : statusLine,
                       selectedExpression: selectedExpression,
+                      selectedActorMode: selectedActorMode,
+                      selectedPractitionerFlow: selectedPractitionerFlow,
+                      selectedMeshMotion: selectedMeshMotion,
+                      selectedClinicianCamera: selectedClinicianCamera,
+                      selectedRearCaptureKind: selectedRearCaptureKind,
+                      activeCapturePass: activeCapturePass,
                     ),
                   ),
                   if (!inCaptureChrome)
@@ -158,6 +189,12 @@ class _LiveGuidance extends StatelessWidget {
     this.deferPoseGuidance = false,
     this.statusLine,
     this.selectedExpression = ExpressionMode.neutral,
+    this.selectedActorMode = CaptureActorMode.user,
+    this.selectedPractitionerFlow = PractitionerFlow.meshThenPhotos,
+    this.selectedMeshMotion = MeshMotionMode.device,
+    this.selectedClinicianCamera = ClinicianCamera.front,
+    this.selectedRearCaptureKind = RearCaptureKind.still,
+    this.activeCapturePass,
   });
 
   final CaptureState state;
@@ -165,11 +202,36 @@ class _LiveGuidance extends StatelessWidget {
   final bool deferPoseGuidance;
   final String? statusLine;
   final ExpressionMode selectedExpression;
+  final CaptureActorMode selectedActorMode;
+  final PractitionerFlow selectedPractitionerFlow;
+  final MeshMotionMode selectedMeshMotion;
+  final ClinicianCamera selectedClinicianCamera;
+  final RearCaptureKind selectedRearCaptureKind;
+  final CapturePass? activeCapturePass;
 
   bool get _useCameraCorners =>
       !deferPoseGuidance &&
       (state.status == CaptureStatus.idle ||
           state.status == CaptureStatus.completed);
+
+  /// Guidance copy: head-mesh (front) uses user-style; photo/rear stays orbit.
+  CaptureActorMode get _actorMode {
+    if (state.status == CaptureStatus.capturing || deferPoseGuidance) {
+      return guidanceActorMode(
+        actorMode: state.actorMode,
+        practitionerFlow: state.practitionerFlow,
+        meshMotion: state.meshMotion,
+        clinicianCamera: state.clinicianCamera,
+        capturePass: activeCapturePass,
+      );
+    }
+    return guidanceActorMode(
+      actorMode: selectedActorMode,
+      practitionerFlow: selectedPractitionerFlow,
+      meshMotion: selectedMeshMotion,
+      clinicianCamera: selectedClinicianCamera,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -249,14 +311,27 @@ class _LiveGuidance extends StatelessWidget {
     switch (state.status) {
       case CaptureStatus.idle:
         return (
-          PoseGuidanceCopy.idleReady,
-          PoseGuidanceCopy.idleHeadline(selectedExpression),
+          PoseGuidanceCopy.idleReady(selectedActorMode),
+          PoseGuidanceCopy.idleHeadline(
+            selectedExpression,
+            actorMode: selectedActorMode,
+            practitionerFlow: selectedPractitionerFlow,
+            meshMotion: selectedMeshMotion,
+            clinicianCamera: selectedClinicianCamera,
+            rearCaptureKind: selectedRearCaptureKind,
+          ),
         );
       case CaptureStatus.completed:
         // Bloc reaches completed before the last still finishes; keep calm copy
         // until deferPoseGuidance clears (freeze / handoff done).
         if (deferPoseGuidance) {
-          return (PoseGuidanceCopy.hint(PoseGuidance.onTarget), null);
+          return (
+            PoseGuidanceCopy.hint(
+              PoseGuidance.onTarget,
+              actorMode: _actorMode,
+            ),
+            null,
+          );
         }
         return (
           PoseGuidanceCopy.completedHeadline,
@@ -267,7 +342,13 @@ class _LiveGuidance extends StatelessWidget {
         return (scanErrorTitle(kind), scanErrorBody(kind, state.errorMessage));
       case CaptureStatus.capturing:
         if (deferPoseGuidance) {
-          return (PoseGuidanceCopy.hint(PoseGuidance.onTarget), null);
+          return (
+            PoseGuidanceCopy.hint(
+              PoseGuidance.onTarget,
+              actorMode: _actorMode,
+            ),
+            null,
+          );
         }
 
         final PoseGuidance? primary = CaptureOverlay.primaryGuidance(state);
@@ -275,14 +356,22 @@ class _LiveGuidance extends StatelessWidget {
         if (holding ||
             primary == PoseGuidance.onTarget ||
             primary == PoseGuidance.holdSteady) {
-          return (PoseGuidanceCopy.hint(PoseGuidance.onTarget), null);
+          return (
+            PoseGuidanceCopy.hint(
+              PoseGuidance.onTarget,
+              actorMode: _actorMode,
+            ),
+            null,
+          );
         }
 
         if (primary != null) {
           return (
             PoseGuidanceCopy.hint(
               primary,
-              expressionScore: state.lastValidation?.expressionScore ?? double.nan,
+              expressionScore:
+                  state.lastValidation?.expressionScore ?? double.nan,
+              actorMode: _actorMode,
             ),
             null,
           );
@@ -296,6 +385,7 @@ class _LiveGuidance extends StatelessWidget {
           PoseGuidanceCopy.poseInstruction(
             pose,
             expression: state.expressionMode,
+            actorMode: _actorMode,
           ),
           null,
         );
@@ -303,6 +393,10 @@ class _LiveGuidance extends StatelessWidget {
   }
 
   PoseGuidance? _directionHint() {
+    // Head animation implies the patient turns — hide for clinician orbit.
+    if (_actorMode == CaptureActorMode.practitioner) {
+      return null;
+    }
     if (state.status != CaptureStatus.capturing ||
         holding ||
         deferPoseGuidance) {
