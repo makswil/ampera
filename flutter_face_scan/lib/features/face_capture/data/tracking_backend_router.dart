@@ -122,6 +122,8 @@ final class TrackingBackendRouter implements FaceTrackingService {
 
   Future<void> shareFiles(List<String> paths) => front.shareFiles(paths);
 
+  Future<void> previewFile(String path) => front.previewFile(path);
+
   Future<void> dismissPresented() => front.dismissPresented();
 
   Future<void> openAppSettings() => front.openAppSettings();

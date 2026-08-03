@@ -4,7 +4,10 @@ import AVFoundation
 import CoreImage
 import CoreML
 import Flutter
+import ModelIO
+import QuickLook
 import SceneKit
+import SceneKit.ModelIO
 import UIKit
 import Vision
 
@@ -82,6 +85,12 @@ enum FaceTrackingPlugin {
         faceScanPresentShare(paths) {
           result(nil)
         }
+      case "previewFile":
+        // Quick Look / SceneKit preview for a single session file (OBJ → 3D).
+        let path = (call.arguments as? [String: Any])?["path"] as? String ?? ""
+        faceScanPresentPreview(path) {
+          result(nil)
+        }
       case "dismissPresented":
         // Unlock Flutter modals after a native share sheet (or other VC) sticks.
         DispatchQueue.main.async {
@@ -131,6 +140,10 @@ enum FaceTrackingPlugin {
     registrar.register(
       FacePreviewFactory(),
       withId: "flutter_face_scan/face_preview"
+    )
+    registrar.register(
+      ObjModelPreviewFactory(),
+      withId: "flutter_face_scan/obj_model_preview"
     )
 
     // Rear camera guided photo path (clinician / Vision pose).
@@ -1053,6 +1066,252 @@ private func faceScanPresentShare(_ paths: [String], done: @escaping () -> Void)
       return
     }
     faceScanPresentShareNow(from: root, urls: urls, done: done)
+  }
+}
+
+/// Opens a non-OBJ session file in Quick Look. OBJ is embedded via
+/// `flutter_face_scan/obj_model_preview` (Flutter `UiKitView`).
+private func faceScanPresentPreview(_ path: String, done: @escaping () -> Void) {
+  DispatchQueue.main.async {
+    guard faceScanIsShareablePath(path),
+          FileManager.default.fileExists(atPath: path),
+          let root = faceScanTopViewController(
+            UIApplication.shared.faceScanKeyWindow?.rootViewController)
+    else {
+      done()
+      return
+    }
+    let url = URL(fileURLWithPath: path)
+    // OBJ belongs in the embedded SceneKit platform view, not a modal.
+    if url.pathExtension.lowercased() == "obj" {
+      done()
+      return
+    }
+    let present: () -> Void = {
+      let vc = FaceScanQLPreviewController(fileURL: url, onDismiss: done)
+      root.present(vc, animated: true) {
+        if root.presentedViewController !== vc {
+          done()
+        }
+      }
+    }
+    if root.presentedViewController != nil {
+      root.dismiss(animated: false, completion: present)
+    } else {
+      present()
+    }
+  }
+}
+
+/// Builds a textured SceneKit scene for a bake OBJ (albedo + optional normal).
+private func faceScanBuildObjScene(objURL: URL) -> (scene: SCNScene, camera: SCNNode) {
+  // ModelIO loads mesh + UVs, but often leaves map_Kd unresolved → white face.
+  // Apply sibling albedo / normal PNGs onto SCNMaterials explicitly.
+  let asset = MDLAsset(url: objURL)
+  asset.loadTextures()
+  let scene = SCNScene(mdlAsset: asset)
+  faceScanApplyBakeTextures(to: scene, objURL: objURL)
+
+  let (minVec, maxVec) = scene.rootNode.boundingBox
+  let center = SCNVector3(
+    (minVec.x + maxVec.x) * 0.5,
+    (minVec.y + maxVec.y) * 0.5,
+    (minVec.z + maxVec.z) * 0.5
+  )
+  let extent = SCNVector3(
+    maxVec.x - minVec.x,
+    maxVec.y - minVec.y,
+    maxVec.z - minVec.z
+  )
+  let radius = max(extent.x, max(extent.y, extent.z))
+  let cameraNode = SCNNode()
+  cameraNode.camera = SCNCamera()
+  cameraNode.camera?.zNear = 0.001
+  cameraNode.camera?.zFar = max(10, Double(radius) * 20)
+  cameraNode.position = SCNVector3(
+    center.x,
+    center.y,
+    center.z + max(radius * 2.2, 0.35)
+  )
+  scene.rootNode.addChildNode(cameraNode)
+
+  let light = SCNNode()
+  light.light = SCNLight()
+  light.light?.type = .omni
+  light.light?.intensity = 800
+  light.position = SCNVector3(center.x, center.y + radius, center.z + radius)
+  scene.rootNode.addChildNode(light)
+
+  let ambient = SCNNode()
+  ambient.light = SCNLight()
+  ambient.light?.type = .ambient
+  ambient.light?.intensity = 400
+  scene.rootNode.addChildNode(ambient)
+
+  return (scene, cameraNode)
+}
+
+/// Embedded SceneKit OBJ viewer for Flutter `UiKitView`.
+final class ObjModelPreviewFactory: NSObject, FlutterPlatformViewFactory {
+  func create(
+    withFrame frame: CGRect,
+    viewIdentifier viewId: Int64,
+    arguments args: Any?
+  ) -> FlutterPlatformView {
+    let map = args as? [String: Any]
+    let path = map?["path"] as? String ?? ""
+    let argb = map?["backgroundArgb"] as? NSNumber
+    return ObjModelPreviewView(
+      frame: frame,
+      objPath: path,
+      backgroundArgb: argb?.uint32Value
+    )
+  }
+
+  func createArgsCodec() -> FlutterMessageCodec & NSObjectProtocol {
+    return FlutterStandardMessageCodec.sharedInstance()
+  }
+}
+
+final class ObjModelPreviewView: NSObject, FlutterPlatformView {
+  private let scnView: SCNView
+
+  init(frame: CGRect, objPath: String, backgroundArgb: UInt32?) {
+    scnView = SCNView(frame: frame)
+    super.init()
+    scnView.backgroundColor = Self.uiColor(argb: backgroundArgb) ?? .black
+    scnView.allowsCameraControl = true
+    scnView.autoenablesDefaultLighting = true
+    scnView.antialiasingMode = .multisampling4X
+
+    guard faceScanIsShareablePath(objPath),
+          FileManager.default.fileExists(atPath: objPath)
+    else {
+      return
+    }
+    let url = URL(fileURLWithPath: objPath)
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let built = faceScanBuildObjScene(objURL: url)
+      DispatchQueue.main.async {
+        guard let self else { return }
+        self.scnView.scene = built.scene
+        self.scnView.pointOfView = built.camera
+      }
+    }
+  }
+
+  func view() -> UIView {
+    return scnView
+  }
+
+  private static func uiColor(argb: UInt32?) -> UIColor? {
+    guard let argb else { return nil }
+    let a = CGFloat((argb >> 24) & 0xFF) / 255
+    let r = CGFloat((argb >> 16) & 0xFF) / 255
+    let g = CGFloat((argb >> 8) & 0xFF) / 255
+    let b = CGFloat(argb & 0xFF) / 255
+    return UIColor(red: r, green: g, blue: b, alpha: a)
+  }
+}
+
+/// Reads `map_Kd` / `map_Kn` from a Wavefront MTL (basename only).
+private func faceScanMtlMaps(from mtlURL: URL) -> (albedo: String?, normal: String?) {
+  guard let text = try? String(contentsOf: mtlURL, encoding: .utf8) else {
+    return (nil, nil)
+  }
+  var albedo: String?
+  var normal: String?
+  for raw in text.components(separatedBy: .newlines) {
+    let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    let lower = line.lowercased()
+    let parts = line.split(whereSeparator: { $0.isWhitespace })
+    guard parts.count >= 2 else { continue }
+    let file = String(parts.last!).split(separator: "/").last.map(String.init) ?? String(parts.last!)
+    if lower.hasPrefix("map_kd") {
+      albedo = file
+    } else if lower.hasPrefix("map_kn") || lower.hasPrefix("norm") {
+      normal = file
+    }
+  }
+  return (albedo, normal)
+}
+
+/// Forces bake albedo (+ optional normal) onto every geometry material.
+private func faceScanApplyBakeTextures(to scene: SCNScene, objURL: URL) {
+  let dir = objURL.deletingLastPathComponent()
+  let stem = objURL.deletingPathExtension().lastPathComponent
+  let mtlMaps = faceScanMtlMaps(from: dir.appendingPathComponent("\(stem).mtl"))
+
+  func sibling(_ name: String?) -> URL? {
+    guard let name, !name.isEmpty else { return nil }
+    let url = dir.appendingPathComponent(name)
+    return FileManager.default.fileExists(atPath: url.path) ? url : nil
+  }
+
+  let albedoURL =
+    sibling(mtlMaps.albedo)
+    ?? sibling("\(stem).png")
+  let normalURL =
+    sibling(mtlMaps.normal)
+    ?? sibling("\(stem)_n.png")
+
+  guard let albedoURL else { return }
+  guard let albedo = UIImage(contentsOfFile: albedoURL.path) else { return }
+  let normal = normalURL.flatMap { UIImage(contentsOfFile: $0.path) }
+
+  func apply(to node: SCNNode) {
+    if let geometry = node.geometry {
+      let material = SCNMaterial()
+      material.lightingModel = .lambert
+      material.isDoubleSided = true
+      material.diffuse.contents = albedo
+      material.diffuse.wrapS = .clamp
+      material.diffuse.wrapT = .clamp
+      if let normal {
+        material.normal.contents = normal
+        material.normal.wrapS = .clamp
+        material.normal.wrapT = .clamp
+      }
+      // Avoid washed-out specular highlights on skin.
+      material.specular.contents = UIColor.black
+      geometry.materials = [material]
+    }
+    for child in node.childNodes {
+      apply(to: child)
+    }
+  }
+  apply(to: scene.rootNode)
+}
+
+/// Quick Look wrapper so dismiss notifies Flutter (same as share sheet).
+final class FaceScanQLPreviewController: QLPreviewController, QLPreviewControllerDataSource {
+  private let fileURL: URL
+  private let onDismiss: () -> Void
+
+  init(fileURL: URL, onDismiss: @escaping () -> Void) {
+    self.fileURL = fileURL
+    self.onDismiss = onDismiss
+    super.init(nibName: nil, bundle: nil)
+    dataSource = self
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    if isBeingDismissed || presentingViewController == nil {
+      onDismiss()
+    }
+  }
+
+  func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+
+  func previewController(
+    _ controller: QLPreviewController,
+    previewItemAt index: Int
+  ) -> QLPreviewItem {
+    fileURL as QLPreviewItem
   }
 }
 

@@ -495,7 +495,7 @@ class _CapturePageState extends State<CapturePage> {
     try {
       await Navigator.of(context).push<void>(
         MaterialPageRoute<void>(
-          builder: (_) => const ScansManagerPage(),
+          builder: (_) => ScansManagerPage(appRole: _debug.appRole),
         ),
       );
     } finally {

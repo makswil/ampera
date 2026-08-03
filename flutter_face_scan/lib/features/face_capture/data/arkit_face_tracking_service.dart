@@ -180,6 +180,13 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     });
   }
 
+  /// Opens a session file in a native preview (OBJ → SceneKit, else Quick Look).
+  Future<void> previewFile(String path) async {
+    await _control.invokeMethod<void>('previewFile', <String, Object?>{
+      'path': path,
+    });
+  }
+
   /// Dismisses any native modal (e.g. leftover share sheet) so Flutter sheets
   /// can present again.
   Future<void> dismissPresented() async {

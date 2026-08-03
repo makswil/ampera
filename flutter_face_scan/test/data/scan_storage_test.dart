@@ -113,4 +113,43 @@ void main() {
 
     expect(await storage.list(), isEmpty);
   });
+
+  test('lists files in a session folder', () async {
+    await makeSession('session_a', bytes: 20);
+    final Directory dir = Directory('${tempDir.path}/face_scans/session_a');
+    await File('${dir.path}/bake_demo.obj').writeAsString('o face');
+    await File('${dir.path}/bake_demo.mtl').writeAsString('newmtl x');
+    await File('${dir.path}/bake_demo.png').writeAsBytes(<int>[1, 2, 3]);
+
+    final ScanStorage storage = ScanStorage(rootDirectory: tempDir);
+    final List<ScanFileEntry> files = await storage.listFiles('session_a');
+
+    expect(
+      files.map((ScanFileEntry f) => f.name),
+      containsAll(<String>[
+        'frontal.ply',
+        'manifest.json',
+        'bake_demo.obj',
+        'bake_demo.mtl',
+        'bake_demo.png',
+      ]),
+    );
+    expect(files.where((ScanFileEntry f) => f.isObj).single.name, 'bake_demo.obj');
+    expect((await storage.newestObj('session_a'))?.name, 'bake_demo.obj');
+    expect(await storage.listFiles('missing'), isEmpty);
+    expect(await storage.listFiles('../session_a'), isEmpty);
+  });
+
+  test('consumerTitle prefers displayName over folder id', () async {
+    await makeSession('session_epoch_999');
+    final ScanStorage storage = ScanStorage(rootDirectory: tempDir);
+
+    ScanEntry entry = (await storage.list()).single;
+    expect(entry.title, 'session_epoch_999');
+    expect(entry.consumerTitle, isNot(contains('session_epoch')));
+
+    await storage.rename('session_epoch_999', 'Alex');
+    entry = (await storage.list()).single;
+    expect(entry.consumerTitle, 'Alex');
+  });
 }

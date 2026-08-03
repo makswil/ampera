@@ -6,20 +6,29 @@ import 'package:path_provider/path_provider.dart';
 
 import '../data/scan_storage.dart';
 import '../data/session_folder_loader.dart';
+import '../domain/entities/capture_actor_mode.dart';
+import 'obj_model_viewer_page.dart';
+import 'session_detail_page.dart';
 
-/// Lists saved scan sessions and lets the user delete them (individually or
-/// all) to reclaim storage.
+/// Lists saved scan sessions and lets the user open, rename, or delete them.
 ///
 /// When [pickMode] is true, tapping a bakeable session returns its id via
 /// [Navigator.pop] (for Prior mesh selection).
+///
+/// User / Clinician: tap opens the newest bake OBJ viewer directly.
+/// Dev: tap opens the raw session file list.
 class ScansManagerPage extends StatefulWidget {
   const ScansManagerPage({
     this.pickMode = false,
+    this.appRole = AppRole.user,
     super.key,
   });
 
   /// If true, only bakeable sessions are listed and a tap selects one.
   final bool pickMode;
+
+  /// Gates open behaviour and list chrome (Dev = technical labels + file list).
+  final AppRole appRole;
 
   @override
   State<ScansManagerPage> createState() => _ScansManagerPageState();
@@ -29,6 +38,8 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
   ScanStorage? _storage;
   List<ScanEntry> _entries = <ScanEntry>[];
   bool _loading = true;
+
+  bool get _isDev => widget.appRole == AppRole.developer;
 
   @override
   void initState() {
@@ -59,6 +70,44 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
     });
   }
 
+  Future<void> _open(ScanEntry entry) async {
+    if (_isDev) {
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => SessionDetailPage(
+            entry: entry,
+            appRole: widget.appRole,
+          ),
+        ),
+      );
+      return;
+    }
+
+    final ScanStorage? storage = _storage;
+    if (storage == null) {
+      return;
+    }
+    final ScanFileEntry? obj = await storage.newestObj(entry.id);
+    if (!mounted) {
+      return;
+    }
+    if (obj == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No 3D model for this scan yet')),
+      );
+      return;
+    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => ObjModelViewerPage(
+          objPath: obj.path,
+          title: entry.consumerTitle,
+          subtitle: entry.expression.label,
+        ),
+      ),
+    );
+  }
+
   Future<void> _deleteOne(ScanEntry entry) async {
     await _storage?.delete(entry.id);
     await _load();
@@ -69,8 +118,8 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
       context: context,
       barrierDismissible: false,
       builder: (BuildContext context) => _RenameScanDialog(
-        initialName: entry.displayName ?? entry.title,
-        placeholder: entry.id,
+        initialName: entry.displayName ?? entry.consumerTitle,
+        placeholder: _isDev ? entry.id : 'My scan',
       ),
     );
     if (next == null) {
@@ -81,7 +130,9 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
   }
 
   Future<void> _deleteAll() async {
-    final bool confirmed = await _confirm('Delete all scans?');
+    final bool confirmed = await _confirm(
+      _isDev ? 'Delete all scans?' : 'Delete all your scans?',
+    );
     if (!confirmed) {
       return;
     }
@@ -109,12 +160,26 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
     return result ?? false;
   }
 
+  String _subtitle(ScanEntry entry) {
+    if (_isDev) {
+      return '${entry.expression.label} · '
+          '${_formatSize(entry.sizeBytes)} · '
+          '${_formatDate(entry.modified)}'
+          '${entry.displayName == null ? '' : ' · ${entry.id}'}';
+    }
+    return entry.expression.label;
+  }
+
   @override
   Widget build(BuildContext context) {
     final bool pick = widget.pickMode;
     return Scaffold(
       appBar: AppBar(
-        title: Text(pick ? 'Choose mesh scan' : 'Saved scans'),
+        title: Text(
+          pick
+              ? 'Choose mesh scan'
+              : (_isDev ? 'Saved scans' : 'Your scans'),
+        ),
         actions: <Widget>[
           if (!pick)
             IconButton(
@@ -131,7 +196,7 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
               child: Text(
                 pick
                     ? 'No scans with a bakeable mesh'
-                    : 'No saved scans',
+                    : (_isDev ? 'No saved scans' : 'No scans yet'),
               ),
             )
           : ListView.separated(
@@ -140,16 +205,18 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
               itemBuilder: (BuildContext context, int index) {
                 final ScanEntry entry = _entries[index];
                 return ListTile(
-                  title: Text(entry.title),
-                  subtitle: Text(
-                    '${entry.expression.label} · '
-                    '${_formatSize(entry.sizeBytes)} · '
-                    '${_formatDate(entry.modified)}'
-                    '${entry.displayName == null ? '' : ' · ${entry.id}'}',
-                  ),
+                  leading: pick
+                      ? null
+                      : Icon(
+                          _isDev
+                              ? Icons.folder_open_outlined
+                              : Icons.view_in_ar_outlined,
+                        ),
+                  title: Text(_isDev ? entry.title : entry.consumerTitle),
+                  subtitle: Text(_subtitle(entry)),
                   onTap: pick
                       ? () => Navigator.pop(context, entry.id)
-                      : null,
+                      : () => unawaited(_open(entry)),
                   trailing: pick
                       ? const Icon(Icons.chevron_right)
                       : Row(

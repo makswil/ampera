@@ -16,6 +16,8 @@ add each file to the host target's Compile Sources:
 | `FaceTrackingManager` + `PhotoCaptureDelegate` | `FaceTrackingManager.swift` |
 | `FacePreviewFactory` / `FacePreviewView` | `FacePreviewFactory.swift` |
 | Share helpers (`faceScanPresentShare*`) | `FaceScanShare.swift` |
+| Preview helpers (`faceScanPresentPreview*`, OBJ/QL) | `FaceScanPreview.swift` |
+| OBJ platform view (`ObjModelPreviewFactory`) | `ObjModelPreviewFactory.swift` |
 | `RearCaptureManager` + rear preview types | `RearCaptureManager.swift` |
 | `MLWhiteBalanceCorrector` | `MLWhiteBalanceCorrector.swift` |
 | `faceScanDebugLog` | `FaceScanLog.swift` (or shared util) |
@@ -27,4 +29,6 @@ Keep `AppDelegate` as a thin bootstrap that only registers the plugin.
 - Method: `flutter_face_scan/face_tracking`
 - Event: `flutter_face_scan/face_tracking/frames`
 - View: `flutter_face_scan/face_preview`
+- View: `flutter_face_scan/obj_model_preview` (embedded SceneKit OBJ viewer)
+- Extra methods on face_tracking: `shareFiles`, `previewFile`, `dismissPresented`, …
 - Rear equivalents: see `RearFaceTrackingService` / `RearCaptureManager`

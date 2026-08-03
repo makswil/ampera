@@ -41,6 +41,66 @@ final class ScanEntry {
     }
     return name;
   }
+
+  /// Short consumer-facing label (no session folder id).
+  ///
+  /// Prefer [displayName]; otherwise a compact date/time like `3 Aug, 14:32`.
+  String get consumerTitle {
+    final String? name = displayName?.trim();
+    if (name != null && name.isNotEmpty) {
+      return name;
+    }
+    return _consumerDate(modified);
+  }
+
+  static String _consumerDate(DateTime d) {
+    const List<String> months = <String>[
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    final DateTime now = DateTime.now();
+    final DateTime today = DateTime(now.year, now.month, now.day);
+    final DateTime day = DateTime(d.year, d.month, d.day);
+    String two(int n) => n.toString().padLeft(2, '0');
+    final String time = '${two(d.hour)}:${two(d.minute)}';
+    if (day == today) {
+      return 'Today, $time';
+    }
+    if (day == today.subtract(const Duration(days: 1))) {
+      return 'Yesterday, $time';
+    }
+    return '${d.day} ${months[d.month - 1]}, $time';
+  }
+}
+
+/// One file inside a session folder (non-recursive — bake sits flat next to poses).
+final class ScanFileEntry {
+  const ScanFileEntry({
+    required this.name,
+    required this.path,
+    required this.sizeBytes,
+    required this.modified,
+  });
+
+  /// Basename only (e.g. `bake_….obj`).
+  final String name;
+
+  /// Absolute path.
+  final String path;
+
+  final int sizeBytes;
+  final DateTime modified;
+
+  /// Lowercase extension without the leading dot, or empty.
+  String get extension {
+    final int dot = name.lastIndexOf('.');
+    if (dot < 0 || dot == name.length - 1) {
+      return '';
+    }
+    return name.substring(dot + 1).toLowerCase();
+  }
+
+  bool get isObj => extension == 'obj';
 }
 
 /// Lists and deletes saved scan sessions under `<root>/face_scans/`.
@@ -95,6 +155,48 @@ final class ScanStorage {
     if (_scansDir.existsSync()) {
       await _scansDir.delete(recursive: true);
     }
+  }
+
+  /// Files directly under the session folder (no subdirs), newest first.
+  /// Empty if [id] is missing or unsafe.
+  Future<List<ScanFileEntry>> listFiles(String id) async {
+    final Directory? dir = SessionPath.sessionDirectory(_scansDir, id);
+    if (dir == null || !dir.existsSync()) {
+      return const <ScanFileEntry>[];
+    }
+
+    final List<ScanFileEntry> files = <ScanFileEntry>[];
+    await for (final FileSystemEntity entity in dir.list(followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      final FileStat stat = await entity.stat();
+      final String name =
+          entity.uri.pathSegments.where((String s) => s.isNotEmpty).last;
+      files.add(
+        ScanFileEntry(
+          name: name,
+          path: entity.path,
+          sizeBytes: stat.size,
+          modified: stat.modified,
+        ),
+      );
+    }
+    files.sort(
+      (ScanFileEntry a, ScanFileEntry b) => b.modified.compareTo(a.modified),
+    );
+    return files;
+  }
+
+  /// Newest bake `.obj` in the session, or null if none / missing session.
+  Future<ScanFileEntry?> newestObj(String id) async {
+    final List<ScanFileEntry> files = await listFiles(id);
+    for (final ScanFileEntry file in files) {
+      if (file.isObj) {
+        return file;
+      }
+    }
+    return null;
   }
 
   /// Sets or clears the session's display name in `manifest.json`.
