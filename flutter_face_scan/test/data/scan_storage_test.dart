@@ -63,6 +63,35 @@ void main() {
     expect(entries.single.expression, ExpressionMode.smile);
   });
 
+  test('renames via displayName without changing folder id', () async {
+    await makeSession('session_a');
+    final ScanStorage storage = ScanStorage(rootDirectory: tempDir);
+
+    await storage.rename('session_a', '  Patient left  ');
+    ScanEntry entry = (await storage.list()).single;
+    expect(entry.id, 'session_a');
+    expect(entry.displayName, 'Patient left');
+    expect(entry.title, 'Patient left');
+
+    await storage.rename('session_a', '   ');
+    entry = (await storage.list()).single;
+    expect(entry.displayName, isNull);
+    expect(entry.title, 'session_a');
+  });
+
+  test('ignores unsafe delete ids (path traversal)', () async {
+    await makeSession('session_a');
+    final ScanStorage storage = ScanStorage(rootDirectory: tempDir);
+
+    await storage.delete('../session_a');
+    await storage.delete('session_a/../session_a');
+
+    expect(
+      (await storage.list()).map((ScanEntry e) => e.id),
+      <String>['session_a'],
+    );
+  });
+
   test('deletes a single session', () async {
     await makeSession('session_a');
     await makeSession('session_b');

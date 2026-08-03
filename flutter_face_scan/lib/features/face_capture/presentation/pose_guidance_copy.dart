@@ -95,38 +95,39 @@ abstract final class PoseGuidanceCopy {
     ClinicianCamera clinicianCamera = ClinicianCamera.front,
     RearCaptureKind rearCaptureKind = RearCaptureKind.still,
   }) {
-    if (actorMode == CaptureActorMode.practitioner) {
-      if (practitionerFlow == PractitionerFlow.reuseMeshRef) {
-        if (clinicianCamera == ClinicianCamera.rear) {
-          return rearCaptureKind == RearCaptureKind.video
-              ? 'Prior mesh · rear video'
-              : 'Prior mesh · rear photos';
-        }
+    if (actorMode != CaptureActorMode.practitioner) {
+      return switch (expression) {
+        ExpressionMode.neutral => '4 angles of your face',
+        ExpressionMode.smile => '4 angles while you smile',
+      };
+    }
+
+    final bool rear = clinicianCamera == ClinicianCamera.rear;
+    final bool rearVideo = rear && rearCaptureKind == RearCaptureKind.video;
+    final bool priorMesh =
+        practitionerFlow == PractitionerFlow.reuseMeshRef;
+    final bool headMesh =
+        practitionerFlow == PractitionerFlow.meshThenPhotos &&
+        meshMotion == MeshMotionMode.head;
+
+    if (priorMesh) {
+      if (!rear) {
         return 'Prior mesh · new photos';
       }
-      final bool headMesh =
-          practitionerFlow == PractitionerFlow.meshThenPhotos &&
-          meshMotion == MeshMotionMode.head;
-      if (clinicianCamera == ClinicianCamera.rear) {
-        final String rear = rearCaptureKind == RearCaptureKind.video
-            ? 'then rear video'
-            : 'then rear photos';
-        if (headMesh) {
-          return 'Head mesh · $rear';
-        }
-        return rearCaptureKind == RearCaptureKind.video
-            ? 'Rear video · sharpest frames'
-            : 'Rear photo · patient still';
-      }
-      if (headMesh) {
-        return 'Patient turns head · mesh';
-      }
-      return 'Move the iPad · patient still';
+      return rearVideo ? 'Prior mesh · rear video' : 'Prior mesh · rear photos';
     }
-    return switch (expression) {
-      ExpressionMode.neutral => '4 angles of your face',
-      ExpressionMode.smile => '4 angles while you smile',
-    };
+    if (rear) {
+      if (headMesh) {
+        return rearVideo ? 'Head mesh · then rear video' : 'Head mesh · then rear photos';
+      }
+      return rearVideo
+          ? 'Rear video · sharpest frames'
+          : 'Rear photo · patient still';
+    }
+    if (headMesh) {
+      return 'Patient turns head · mesh';
+    }
+    return 'Move the iPad · patient still';
   }
 
   static String idleReady(CaptureActorMode actorMode) =>

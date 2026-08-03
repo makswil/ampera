@@ -4,13 +4,15 @@ import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart';
 
+import '../domain/constants/capture_defaults.dart';
 import '../domain/entities/face_observation.dart';
 import '../domain/entities/still_capture.dart';
 import '../domain/services/face_tracking_service.dart';
 import 'mappers/face_anchor_mapper.dart';
 
 /// iOS ARKit (TrueDepth) implementation of [FaceTrackingService], backed by a
-/// **native platform channel** (see `ios/Runner/FaceTracking/*.swift`).
+/// **native platform channel** (see `ios/Runner/AppDelegate.swift`;
+/// split guide in `ios/Runner/FaceTracking/README.md`).
 ///
 /// arkit_plugin is intentionally not used: it does not expose the
 /// `ARFaceGeometry` vertex buffer to Dart, which the symmetry-axis logic and V3
@@ -205,17 +207,17 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
   ///
   /// When [matchFrontal] is true, the first JPEG's estimated Kelvin is the
   /// shared target (all poses → frontal WB). Otherwise [targetKelvin] is used
-  /// (default 5600 = neutral daylight).
+  /// (default [CaptureDefaults.neutralKelvin] = daylight).
   Future<WhiteBalanceResult?> correctWhiteBalance({
     required List<Uint8List> jpegs,
     bool matchFrontal = false,
-    double targetKelvin = 5600,
+    double targetKelvin = CaptureDefaults.neutralKelvin,
   }) async {
     if (jpegs.isEmpty) {
       return const WhiteBalanceResult(
         ok: true,
         jpegs: <Uint8List>[],
-        targetKelvin: 5600,
+        targetKelvin: CaptureDefaults.neutralKelvin,
       );
     }
     try {

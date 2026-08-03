@@ -8,6 +8,15 @@ import SceneKit
 import UIKit
 import Vision
 
+/// Debug-only console log. Stripped from release so AE/AWB / ml-wb timing
+/// never leaks into production device logs.
+@inline(__always)
+private func faceScanDebugLog(_ message: @autoclosure () -> String) {
+  #if DEBUG
+  NSLog("%@", message())
+  #endif
+}
+
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   override func application(
@@ -28,10 +37,9 @@ import Vision
 
 // MARK: - TrueDepth face tracking
 //
-// NOTE: this code lives in AppDelegate.swift (already part of the Runner build
-// target) on purpose, so no Xcode "Target Membership" step is needed. It can be
-// split back into ios/Runner/FaceTracking/*.swift later if those files are added
-// to the Runner target in Build Phases → Compile Sources.
+// Lives in AppDelegate.swift on purpose (already in the Runner Compile Sources).
+// Empty FaceTracking/*.swift stubs were removed — they were not in the Xcode
+// target and misled readers. Split guide: ios/Runner/FaceTracking/README.md
 
 /// Registers the TrueDepth face-tracking channels and preview platform view.
 ///
@@ -558,7 +566,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       }
       device.unlockForConfiguration()
     } catch {
-      NSLog("[face_scan] AE/AWB auto config failed: \(error)")
+      faceScanDebugLog("[face_scan] AE/AWB auto config failed: \(error)")
     }
 
     Thread.sleep(forTimeInterval: 0.1) // kick adjustment
@@ -576,11 +584,13 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     let gains = device.deviceWhiteBalanceGains
     lockedLook = LockedCameraLook(iso: iso, duration: duration, gains: gains)
     applyLockedLook(LockedCameraLook(iso: iso, duration: duration, gains: gains), on: device)
-    NSLog(
-      "[face_scan] AE/AWB locked iso=%.0f duration=%.4fs gains=r%.2f g%.2f b%.2f",
-      iso,
-      CMTimeGetSeconds(duration),
-      gains.redGain, gains.greenGain, gains.blueGain
+    faceScanDebugLog(
+      String(
+        format: "[face_scan] AE/AWB locked iso=%.0f duration=%.4fs gains=r%.2f g%.2f b%.2f",
+        iso,
+        CMTimeGetSeconds(duration),
+        gains.redGain, gains.greenGain, gains.blueGain
+      )
     )
   }
 
@@ -605,7 +615,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       }
       device.unlockForConfiguration()
     } catch {
-      NSLog("[face_scan] AE/AWB lock apply failed: \(error)")
+      faceScanDebugLog("[face_scan] AE/AWB lock apply failed: \(error)")
     }
   }
 
@@ -695,7 +705,9 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       ?? AVCaptureDevice.default(
         .builtInTrueDepthCamera, for: .video, position: .front
       )?.activeFormat.videoFieldOfView ?? 0
-    NSLog("[face_scan] FOV check — ARKit hFOV=%.2f°  AVCapture hFOV=%.2f°", arFovX, avFovX)
+    faceScanDebugLog(
+      String(format: "[face_scan] FOV check — ARKit hFOV=%.2f°  AVCapture hFOV=%.2f°", arFovX, avFovX)
+    )
   }
 
   /// Portrait JPEG + the projection into it, all from one [frame] (so pixels and
@@ -999,10 +1011,30 @@ final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
 /// [done] runs once the sheet is dismissed (share or cancel). Always called on
 /// the main queue — even if presentation fails — so the Flutter method channel
 /// never hangs and a subsequent share can re-present.
+private func faceScanIsShareablePath(_ path: String) -> Bool {
+  let fm = FileManager.default
+  guard let docs = try? fm.url(
+    for: .documentDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: false
+  ) else {
+    return false
+  }
+  let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+  let allowedRoots = [
+    docs.appendingPathComponent("face_scans", isDirectory: true).path,
+    fm.temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL.path,
+  ]
+  return allowedRoots.contains { root in
+    resolved == root || resolved.hasPrefix(root.hasSuffix("/") ? root : root + "/")
+  }
+}
+
 private func faceScanPresentShare(_ paths: [String], done: @escaping () -> Void) {
   DispatchQueue.main.async {
     let urls = paths
-      .filter { FileManager.default.fileExists(atPath: $0) }
+      .filter { faceScanIsShareablePath($0) && FileManager.default.fileExists(atPath: $0) }
       .map { URL(fileURLWithPath: $0) }
     guard !urls.isEmpty,
           let root = faceScanTopViewController(
@@ -1473,7 +1505,7 @@ final class RearCaptureManager: NSObject, FlutterStreamHandler {
       }
       device.unlockForConfiguration()
     } catch {
-      NSLog("[face_scan] rear AE/AWB auto config failed: \(error)")
+      faceScanDebugLog("[face_scan] rear AE/AWB auto config failed: \(error)")
     }
 
     Thread.sleep(forTimeInterval: 0.1)
@@ -1490,11 +1522,13 @@ final class RearCaptureManager: NSObject, FlutterStreamHandler {
     let gains = device.deviceWhiteBalanceGains
     lockedLook = LockedCameraLook(iso: iso, duration: duration, gains: gains)
     applyLockedLook(LockedCameraLook(iso: iso, duration: duration, gains: gains), on: device)
-    NSLog(
-      "[face_scan] rear AE/AWB locked iso=%.0f duration=%.4fs gains=r%.2f g%.2f b%.2f",
-      iso,
-      CMTimeGetSeconds(duration),
-      gains.redGain, gains.greenGain, gains.blueGain
+    faceScanDebugLog(
+      String(
+        format: "[face_scan] rear AE/AWB locked iso=%.0f duration=%.4fs gains=r%.2f g%.2f b%.2f",
+        iso,
+        CMTimeGetSeconds(duration),
+        gains.redGain, gains.greenGain, gains.blueGain
+      )
     )
   }
 
@@ -1519,7 +1553,7 @@ final class RearCaptureManager: NSObject, FlutterStreamHandler {
       }
       device.unlockForConfiguration()
     } catch {
-      NSLog("[face_scan] rear AE/AWB lock apply failed: \(error)")
+      faceScanDebugLog("[face_scan] rear AE/AWB lock apply failed: \(error)")
     }
   }
 
@@ -1912,13 +1946,15 @@ final class MLWhiteBalanceCorrector {
         sumUpsample += timing["upsample"] ?? 0
         sumRgba += timing["rgba"] ?? 0
         lock.unlock()
-        NSLog(
-          "[face_scan] ml-wb pose%d ms: rgba=%.0f kelvin=%.0f resize=%.0f pack=%.0f predict=%.0f ratio=%.0f upsample=%.0f apply=%.0f encode=%.0f total=%.0f (%dx%d)",
-          i,
-          timing["rgba"] ?? 0, timing["kelvin"] ?? 0, timing["resize"] ?? 0,
-          timing["pack"] ?? 0, timing["predict"] ?? 0, timing["ratio"] ?? 0,
-          timing["upsample"] ?? 0, timing["apply"] ?? 0, encMs,
-          timing["poseTotal"] ?? 0, cg.width, cg.height
+        faceScanDebugLog(
+          String(
+            format: "[face_scan] ml-wb pose%d ms: rgba=%.0f kelvin=%.0f resize=%.0f pack=%.0f predict=%.0f ratio=%.0f upsample=%.0f apply=%.0f encode=%.0f total=%.0f (%dx%d)",
+            i,
+            timing["rgba"] ?? 0, timing["kelvin"] ?? 0, timing["resize"] ?? 0,
+            timing["pack"] ?? 0, timing["predict"] ?? 0, timing["ratio"] ?? 0,
+            timing["upsample"] ?? 0, timing["apply"] ?? 0, encMs,
+            timing["poseTotal"] ?? 0, cg.width, cg.height
+          )
         )
       }
     }
@@ -1929,10 +1965,12 @@ final class MLWhiteBalanceCorrector {
       outJpegs[i] ?? FlutterStandardTypedData(bytes: datas[i])
     }
     let batchMs = (CFAbsoluteTimeGetCurrent() - tBatch) * 1000
-    NSLog(
-      "[face_scan] ml-wb BATCH ms: decode=%.0f kelvinRef=%.0f rgbaΣ=%.0f predictΣ=%.0f upsampleΣ=%.0f applyΣ=%.0f encodeΣ=%.0f total=%.0f poses=%d parallel=%d",
-      decodeMs, kelvinMs, sumRgba, sumPredict, sumUpsample, sumApply, sumEncode,
-      batchMs, n, parallel
+    faceScanDebugLog(
+      String(
+        format: "[face_scan] ml-wb BATCH ms: decode=%.0f kelvinRef=%.0f rgbaΣ=%.0f predictΣ=%.0f upsampleΣ=%.0f applyΣ=%.0f encodeΣ=%.0f total=%.0f poses=%d parallel=%d",
+        decodeMs, kelvinMs, sumRgba, sumPredict, sumUpsample, sumApply, sumEncode,
+        batchMs, n, parallel
+      )
     )
     return [
       "ok": true,
@@ -1991,7 +2029,7 @@ final class MLWhiteBalanceCorrector {
       Bundle.main.url(forResource: "MLWhiteBalance", withExtension: "mlmodelc")
       ?? Bundle.main.url(forResource: "MLWhiteBalance", withExtension: "mlpackage")
     guard let url else {
-      NSLog("[face_scan] MLWhiteBalance model not in bundle")
+      faceScanDebugLog("[face_scan] MLWhiteBalance model not in bundle")
       return nil
     }
     do {
@@ -2006,7 +2044,7 @@ final class MLWhiteBalanceCorrector {
       model = try MLModel(contentsOf: compiled, configuration: cfg)
       return model
     } catch {
-      NSLog("[face_scan] MLWhiteBalance load failed: \(error)")
+      faceScanDebugLog("[face_scan] MLWhiteBalance load failed: \(error)")
       return nil
     }
   }

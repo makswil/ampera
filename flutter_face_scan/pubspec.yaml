@@ -1,5 +1,5 @@
 name: flutter_face_scan
-description: "A new Flutter project."
+description: TrueDepth face capture and UV texture bake for dermatological 3D analysis (iOS).
 publish_to: 'none'
 version: 0.1.0+1
 
@@ -17,7 +17,7 @@ dependencies:
   # explicitly rather than relying on it arriving transitively.
   vector_math: ^2.1.4
 
-  # Pure-Dart JPG decode + PNG encode for UV texture baking (tool + app isolate).
+  # Pure-Dart JPG decode + PNG encode for UV texture baking (app isolate).
   image: ^4.0.0
 
   arkit_plugin: ^1.4.0

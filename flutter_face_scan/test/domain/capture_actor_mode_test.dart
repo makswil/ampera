@@ -2,6 +2,25 @@ import 'package:flutter_face_scan/features/face_capture/domain/entities/capture_
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  group('AppRole', () {
+    test('fromName parses known values and defaults unknown', () {
+      expect(AppRole.fromName('user'), AppRole.user);
+      expect(AppRole.fromName('clinician'), AppRole.clinician);
+      expect(AppRole.fromName('developer'), AppRole.developer);
+      expect(AppRole.fromName(null), AppRole.user);
+      expect(AppRole.fromName('nope'), AppRole.user);
+    });
+
+    test('lockedActorMode locks user/clinician, frees developer', () {
+      expect(AppRole.user.lockedActorMode, CaptureActorMode.user);
+      expect(
+        AppRole.clinician.lockedActorMode,
+        CaptureActorMode.practitioner,
+      );
+      expect(AppRole.developer.lockedActorMode, isNull);
+    });
+  });
+
   group('CaptureActorMode', () {
     test('fromName parses known values and defaults unknown', () {
       expect(CaptureActorMode.fromName('user'), CaptureActorMode.user);

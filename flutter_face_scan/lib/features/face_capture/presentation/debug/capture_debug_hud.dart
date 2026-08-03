@@ -3,37 +3,11 @@ import 'package:flutter/material.dart';
 import '../../application/capture_state.dart';
 import '../../domain/entities/pose_guidance.dart';
 
-/// Compile-time switch for the calibration HUD.
-///
-/// Defaults to `false`, so in a normal build the `if (kCaptureDebugHud)` guard
-/// in `CapturePage` is a dead branch and the tree-shaker removes the HUD and
-/// this whole file from the release binary — the production capture flow does
-/// NOT depend on any of it.
-///
-/// Use a profile file instead of typing flags manually:
-///   flutter run --dart-define-from-file=dart_defines/dev.json
-///
-/// Available profiles (see dart_defines/):
-///   dev.json        — HUD on, mesh on
-///   hud_only.json   — HUD on, mesh off
-///   mesh_only.json  — HUD off, mesh on
-///   release.json    — everything off (same as no flag)
-const bool kCaptureDebugHud =
-    bool.fromEnvironment('CAPTURE_DEBUG_HUD');
-
-/// Compile-time switch for the native live mesh + symmetry-axis overlay
-/// (green wireframe + red midline dots), used to visually verify the vertex
-/// table and L/R mapping. Default `false` → never requested in release.
-///
-/// See [kCaptureDebugHud] for the profile-file approach.
-const bool kFaceMeshOverlay =
-    bool.fromEnvironment('FACE_MESH_OVERLAY');
-
 /// Read-only calibration overlay: live Euler angles + symmetry-axis fit, so the
 /// two on-device unknowns (Euler sign mapping, vertex-index table) can be
 /// eyeballed. Pure presentation — reads only what the BLoC already emits.
 ///
-/// Even when compiled in, tap the badge to hide it instantly.
+/// Shown when Settings → Calibration HUD is on. Tap the badge to hide instantly.
 class CaptureDebugHud extends StatefulWidget {
   const CaptureDebugHud({
     required this.state,

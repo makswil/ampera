@@ -10,12 +10,14 @@ import '../application/capture_bloc.dart';
 import '../application/capture_event.dart';
 import '../application/capture_state.dart';
 import '../application/capture_status.dart';
+import '../application/session_white_balance.dart';
 import '../data/arkit_face_tracking_service.dart';
 import '../data/bake/session_baker.dart';
 import '../data/file_snapshot_repository.dart';
 import '../data/rear_face_tracking_service.dart';
 import '../data/session_folder_loader.dart';
 import '../data/tracking_backend_router.dart';
+import '../domain/constants/capture_defaults.dart';
 import '../domain/constants/face_vertex_indices.dart';
 import '../domain/entities/capture_actor_mode.dart';
 import '../domain/entities/capture_session.dart';
@@ -31,6 +33,7 @@ import '../domain/services/symmetry_axis_extractor.dart';
 import '../domain/value_objects/pose_tolerance.dart';
 import 'debug/capture_debug_hud.dart';
 import 'debug/debug_settings.dart';
+import 'face_scan_log.dart';
 import 'feedback/capture_feedback.dart';
 import 'onboarding_store.dart';
 import 'pose_guidance_copy.dart';
@@ -96,6 +99,10 @@ class _CapturePageState extends State<CapturePage> {
 
   /// Active sequential pass; null for single-pass runs / idle.
   CapturePass? _sequentialPass;
+
+  /// When false, [UiKitView] is removed so iOS text fields (e.g. rename) work.
+  /// Platform views under a pushed route break TextField caret/input on iOS.
+  bool _platformPreviewVisible = true;
 
   /// Mesh-pass snapshots stashed before the rear photo pass restarts the bloc.
   List<CaptureSnapshot>? _meshSnapshots;
@@ -369,7 +376,7 @@ class _CapturePageState extends State<CapturePage> {
   }
 
   /// Hands the Dart-owned axis index table to native (required for the 2D
-  /// "facing camera" gate) and reflects the current mesh-overlay toggle.
+  /// "facing camera" gate) and applies the Settings mesh-overlay toggle.
   void _applyOverlay() {
     unawaited(
       _trackingService.setOverlay(
@@ -479,14 +486,23 @@ class _CapturePageState extends State<CapturePage> {
     }());
   }
 
-  void _openScansManager() {
-    unawaited(
-      Navigator.of(context).push(
+  Future<void> _openScansManager() async {
+    await _trackingService.dismissPresented();
+    if (!mounted) {
+      return;
+    }
+    setState(() => _platformPreviewVisible = false);
+    try {
+      await Navigator.of(context).push<void>(
         MaterialPageRoute<void>(
           builder: (_) => const ScansManagerPage(),
         ),
-      ),
-    );
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _platformPreviewVisible = true);
+      }
+    }
   }
 
   /// Loads a bakeable prior mesh into the sequential stash for a photo-only run.
@@ -535,11 +551,19 @@ class _CapturePageState extends State<CapturePage> {
     if (!mounted) {
       return;
     }
-    final String? id = await Navigator.of(context).push<String>(
-      MaterialPageRoute<String>(
-        builder: (_) => const ScansManagerPage(pickMode: true),
-      ),
-    );
+    setState(() => _platformPreviewVisible = false);
+    String? id;
+    try {
+      id = await Navigator.of(context).push<String>(
+        MaterialPageRoute<String>(
+          builder: (_) => const ScansManagerPage(pickMode: true),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _platformPreviewVisible = true);
+      }
+    }
     if (id != null) {
       _debug.meshRefSessionId = id;
     }
@@ -591,14 +615,24 @@ class _CapturePageState extends State<CapturePage> {
           ),
           const Divider(height: 1),
           ListTile(
-            title: const Text('Scan operator'),
-            trailing: _SettingsSegmented<CaptureActorMode>(
-              values: CaptureActorMode.values,
-              selected: _debug.actorMode,
-              labelOf: (CaptureActorMode m) => m.label,
-              onChanged: (CaptureActorMode m) => _debug.actorMode = m,
+            title: const Text('Role'),
+            trailing: _SettingsDropdown<AppRole>(
+              values: AppRole.values,
+              selected: _debug.appRole,
+              labelOf: (AppRole r) => r.label,
+              onChanged: (AppRole r) => _debug.appRole = r,
             ),
           ),
+          if (_debug.isDev)
+            ListTile(
+              title: const Text('Scan operator'),
+              trailing: _SettingsSegmented<CaptureActorMode>(
+                values: CaptureActorMode.values,
+                selected: _debug.actorMode,
+                labelOf: (CaptureActorMode m) => m.label,
+                onChanged: (CaptureActorMode m) => _debug.actorMode = m,
+              ),
+            ),
           if (_debug.actorMode == CaptureActorMode.practitioner) ...<Widget>[
             ListTile(
               title: const Text('Mesh source'),
@@ -669,69 +703,70 @@ class _CapturePageState extends State<CapturePage> {
                   onChanged: (RearCaptureKind k) => _debug.rearCaptureKind = k,
                 ),
               ),
+            ListTile(
+              title: const Text('Stability'),
+              subtitle: _debug.stabilityProfile == CaptureStabilityProfile.tripod
+                  ? const Text('Tighter angles · ~1.2 s hold')
+                  : const Text('Forgiving · ~2.5 s hold'),
+              trailing: _SettingsSegmented<CaptureStabilityProfile>(
+                values: CaptureStabilityProfile.values,
+                selected: _debug.stabilityProfile,
+                labelOf: (CaptureStabilityProfile p) => p.label,
+                onChanged: (CaptureStabilityProfile p) =>
+                    _debug.stabilityProfile = p,
+              ),
+            ),
           ],
-          ListTile(
-            title: const Text('Stability'),
-            subtitle: _debug.stabilityProfile == CaptureStabilityProfile.tripod
-                ? const Text('Tighter angles · ~1.2 s hold')
-                : const Text('Forgiving · ~2.5 s hold'),
-            trailing: _SettingsSegmented<CaptureStabilityProfile>(
-              values: CaptureStabilityProfile.values,
-              selected: _debug.stabilityProfile,
-              labelOf: (CaptureStabilityProfile p) => p.label,
-              onChanged: (CaptureStabilityProfile p) =>
-                  _debug.stabilityProfile = p,
-            ),
-          ),
           const Divider(height: 1),
-          ListTile(
-            title: Text(
-              'Face distance: '
-              '${(_debug.targetDistanceMeters * 100).round()} cm',
-            ),
-            subtitle: const Text(
-              'Closer fills the outline more. '
-              'Too close can clip on side angles.',
-            ),
-          ),
-          Slider(
-            value: _debug.targetDistanceMeters,
-            min: PoseTolerance.kMinTargetDistanceMeters,
-            max: PoseTolerance.kMaxTargetDistanceMeters,
-            divisions: 20,
-            label: '${(_debug.targetDistanceMeters * 100).round()} cm',
-            onChanged: (double v) => _debug.targetDistanceMeters = v,
-          ),
-          const Divider(height: 1),
-          SwitchListTile(
-            title: const Text('Calibration HUD'),
-            value: _debug.showHud,
-            onChanged: (bool v) => _debug.showHud = v,
-          ),
           SwitchListTile(
             title: const Text('Face mesh overlay'),
             value: _debug.showMesh,
             onChanged: (bool v) => _debug.showMesh = v,
           ),
-          SwitchListTile(
-            title: const Text('Texture: AVCapture hi-res'),
-            subtitle: const Text(
-              'On = 7 MP photo per pose (sharper). '
-              'Off = ARKit video (stable).',
+          if (_debug.isDev) ...<Widget>[
+            ListTile(
+              title: Text(
+                'Face distance: '
+                '${(_debug.targetDistanceMeters * 100).round()} cm',
+              ),
+              subtitle: const Text(
+                'Closer fills the outline more. '
+                'Too close can clip on side angles.',
+              ),
             ),
-            value: _debug.hiResPhoto,
-            onChanged: (bool v) => _debug.hiResPhoto = v,
-          ),
-          SwitchListTile(
-            title: const Text('Lock AE/AWB after first shot'),
-            subtitle: const Text(
-              'On = reuse ISO/shutter/WB from the first pose of each '
-              'camera pass (front hi-res + rear photo/video). '
-              'Off = auto per pose.',
+            Slider(
+              value: _debug.targetDistanceMeters,
+              min: PoseTolerance.kMinTargetDistanceMeters,
+              max: PoseTolerance.kMaxTargetDistanceMeters,
+              divisions: 20,
+              label: '${(_debug.targetDistanceMeters * 100).round()} cm',
+              onChanged: (double v) => _debug.targetDistanceMeters = v,
             ),
-            value: _debug.lockAeAwb,
-            onChanged: (bool v) => _debug.lockAeAwb = v,
-          ),
+            SwitchListTile(
+              title: const Text('Calibration HUD'),
+              value: _debug.showHud,
+              onChanged: (bool v) => _debug.showHud = v,
+            ),
+            SwitchListTile(
+              title: const Text('Texture: AVCapture hi-res'),
+              subtitle: const Text(
+                'On = 7 MP photo per pose (sharper). '
+                'Off = ARKit video (stable).',
+              ),
+              value: _debug.hiResPhoto,
+              onChanged: (bool v) => _debug.hiResPhoto = v,
+            ),
+            SwitchListTile(
+              title: const Text('Lock AE/AWB after first shot'),
+              subtitle: const Text(
+                'On = reuse ISO/shutter/WB from the first pose of each '
+                'camera pass (front hi-res + rear photo/video). '
+                'Off = auto per pose.',
+              ),
+              value: _debug.lockAeAwb,
+              onChanged: (bool v) => _debug.lockAeAwb = v,
+            ),
+          ],
         ];
       },
     ));
@@ -755,7 +790,8 @@ class _CapturePageState extends State<CapturePage> {
           subtitle: Text(
             _debug.mlWb
                 ? 'On = all poses → frontal Kelvin. '
-                    'Off = all poses → default 5600 K.'
+                    'Off = all poses → default '
+                    '${CaptureDefaults.neutralKelvin.round()} K.'
                 : 'Enable ml-wb first.',
           ),
           value: _debug.mlWbMatchFrontal,
@@ -836,7 +872,7 @@ class _CapturePageState extends State<CapturePage> {
                 : (_debug.mlWb
                     ? (_debug.mlWbMatchFrontal
                         ? 'ml-wb → frontal Kelvin'
-                        : 'ml-wb → 5600 K')
+                        : 'ml-wb → ${CaptureDefaults.neutralKelvin.round()} K')
                     : 'ml-wb off'),
           ),
           enabled: !_baking && _lastSession != null,
@@ -1072,8 +1108,9 @@ class _CapturePageState extends State<CapturePage> {
       final String timingLine = mlWbMs == null
           ? '$bakeTiming · wall ${wall.elapsedMilliseconds}ms'
           : 'ml-wb ${mlWbMs}ms · $bakeTiming · wall ${wall.elapsedMilliseconds}ms';
-      // ignore: avoid_print
-      print('[face_scan] $timingLine${mlWbNote != null ? ' | $mlWbNote' : ''}');
+      faceScanLog(
+        '$timingLine${mlWbNote != null ? ' | $mlWbNote' : ''}',
+      );
       if (mounted) {
         setState(() {
           _baking = false;
@@ -1081,8 +1118,7 @@ class _CapturePageState extends State<CapturePage> {
         });
       }
     } on Object catch (e) {
-      // ignore: avoid_print
-      print('[face_scan] Bake failed: $e');
+      faceScanLog('Bake failed: $e');
       if (mounted) {
         setState(() {
           _baking = false;
@@ -1095,70 +1131,33 @@ class _CapturePageState extends State<CapturePage> {
   /// `matchFrontal` can use it as the shared Kelvin target.
   Future<({CaptureSession session, String note})> _applyMlWb(
     CaptureSession session,
-  ) async {
-    final List<FacePose> order = <FacePose>[
-      FacePose.frontal,
-      for (final FacePose p in FacePose.captureSequence)
-        if (p != FacePose.frontal && session.stills.containsKey(p)) p,
-    ];
-    final List<FacePose> present = <FacePose>[
-      for (final FacePose p in order)
-        if (session.stills[p] != null) p,
-    ];
-    if (present.isEmpty) {
-      return (session: session, note: 'ml-wb: no stills');
-    }
-    final List<Uint8List> inputs = <Uint8List>[
-      for (final FacePose p in present) session.stills[p]!.bytes,
-    ];
-    final WhiteBalanceResult? result =
-        await _trackingService.correctWhiteBalance(
-      jpegs: inputs,
+  ) {
+    return applySessionWhiteBalance(
+      session: session,
       matchFrontal: _debug.mlWbMatchFrontal,
-      targetKelvin: 5600,
-    );
-    if (result == null || !result.ok || result.jpegs.length != present.length) {
-      return (
-        session: session,
-        note: 'ml-wb FAILED (${result?.error ?? 'no response'}) — raw stills'
-            '${result?.timingSummary != null ? ' · ${result!.timingSummary}' : ''}',
-      );
-    }
-    final Map<FacePose, StillCapture> stills =
-        Map<FacePose, StillCapture>.of(session.stills);
-    for (int i = 0; i < present.length; i++) {
-      final StillCapture old = stills[present[i]]!;
-      stills[present[i]] = StillCapture(
-        bytes: result.jpegs[i],
-        width: old.width,
-        height: old.height,
-        viewMatrix: old.viewMatrix,
-        projectionMatrix: old.projectionMatrix,
-        faceTransform: old.faceTransform,
-      );
-    }
-    final String mode =
-        _debug.mlWbMatchFrontal ? 'frontal' : '5600 K';
-    final String timing = result.timingSummary != null
-        ? ' · ${result.timingSummary}'
-        : '';
-    return (
-      session: CaptureSession(
-        id: session.id,
-        createdAt: session.createdAt,
-        snapshots: session.snapshots,
-        stills: stills,
-        rearStills: session.rearStills,
-        expression: session.expression,
-        actorMode: session.actorMode,
-        practitionerFlow: session.practitionerFlow,
-        meshMotion: session.meshMotion,
-        clinicianCamera: session.clinicianCamera,
-        rearCaptureKind: session.rearCaptureKind,
-        meshRefSessionId: session.meshRefSessionId,
-        stabilityProfile: session.stabilityProfile,
-      ),
-      note: 'ml-wb OK → ${result.targetKelvin.round()} K ($mode)$timing',
+      targetKelvin: CaptureDefaults.neutralKelvin,
+      correct: ({
+        required List<Uint8List> jpegs,
+        required bool matchFrontal,
+        required double targetKelvin,
+      }) async {
+        final WhiteBalanceResult? result =
+            await _trackingService.correctWhiteBalance(
+          jpegs: jpegs,
+          matchFrontal: matchFrontal,
+          targetKelvin: targetKelvin,
+        );
+        if (result == null) {
+          return null;
+        }
+        return WhiteBalanceCorrection(
+          ok: result.ok,
+          jpegs: result.jpegs,
+          targetKelvin: result.targetKelvin,
+          error: result.error,
+          timingSummary: result.timingSummary,
+        );
+      },
     );
   }
 
@@ -1300,11 +1299,14 @@ class _CapturePageState extends State<CapturePage> {
           body: Stack(
             fit: StackFit.expand,
             children: <Widget>[
-              UiKitView(
-                viewType: _trackingService.isRear
-                    ? RearFaceTrackingService.previewViewType
-                    : CapturePage.previewViewType,
-              ),
+              if (_platformPreviewVisible)
+                UiKitView(
+                  viewType: _trackingService.isRear
+                      ? RearFaceTrackingService.previewViewType
+                      : CapturePage.previewViewType,
+                )
+              else
+                const ColoredBox(color: Colors.black),
               if (_previewFreeze != null)
                 IgnorePointer(
                   child: AnimatedOpacity(
@@ -1321,132 +1323,163 @@ class _CapturePageState extends State<CapturePage> {
                     ),
                   ),
                 ),
-              BlocBuilder<CaptureBloc, CaptureState>(
-                builder: (BuildContext context, CaptureState state) =>
-                    CaptureOverlay(
-                  state: state,
-                  onStart: () => unawaited(_handleStart()),
-                  onRetake: () => unawaited(_handleStart()),
-                  onOpenSettings: () =>
-                      unawaited(_trackingService.openAppSettings()),
-                  targetDistanceMeters: _debug.targetDistanceMeters,
-                  captureBanner: _captureBanner,
-                  deferPoseGuidance: _awaitingStill,
-                  statusLine: _consumerStatusLine(),
-                  selectedExpression: _selectedExpression,
-                  onExpressionChanged: (ExpressionMode mode) {
-                    setState(() => _selectedExpression = mode);
-                  },
-                  selectedActorMode: _debug.actorMode,
-                  selectedPractitionerFlow: _debug.practitionerFlow,
-                  selectedMeshMotion: _debug.meshMotion,
-                  selectedClinicianCamera: _debug.clinicianCamera,
-                  selectedRearCaptureKind: _debug.rearCaptureKind,
-                  activeCapturePass: _sequentialPass,
-                ),
-              ),
-              // Calibration HUD — visibility is a runtime debug toggle.
               ListenableBuilder(
                 listenable: _debug,
-                builder: (BuildContext context, Widget? _) => _debug.showHud
-                    ? BlocBuilder<CaptureBloc, CaptureState>(
-                        builder: (BuildContext context, CaptureState state) =>
-                            CaptureDebugHud(
-                          state: state,
-                          hiRes: _trackingService.hiResCapture,
-                          srcRes: _trackingService.captureWidth > 0
-                              ? '${_trackingService.captureWidth}'
-                                  'x${_trackingService.captureHeight}'
-                              : null,
-                          photoRes: _trackingService.photoWidth > 0
-                              ? '${_trackingService.photoWidth}'
-                                  'x${_trackingService.photoHeight}'
-                              : null,
-                        ),
-                      )
-                    : const SizedBox.shrink(),
+                builder: (BuildContext context, Widget? _) =>
+                    BlocBuilder<CaptureBloc, CaptureState>(
+                  builder: (BuildContext context, CaptureState state) =>
+                      CaptureOverlay(
+                    state: state,
+                    onStart: () => unawaited(_handleStart()),
+                    onRetake: () => unawaited(_handleStart()),
+                    onOpenSettings: () =>
+                        unawaited(_trackingService.openAppSettings()),
+                    targetDistanceMeters: _debug.targetDistanceMeters,
+                    captureBanner: _captureBanner,
+                    deferPoseGuidance: _awaitingStill,
+                    statusLine: _consumerStatusLine(),
+                    selectedExpression: _selectedExpression,
+                    onExpressionChanged: (ExpressionMode mode) {
+                      setState(() => _selectedExpression = mode);
+                    },
+                    selectedActorMode: _debug.actorMode,
+                    selectedPractitionerFlow: _debug.practitionerFlow,
+                    selectedMeshMotion: _debug.meshMotion,
+                    selectedClinicianCamera: _debug.clinicianCamera,
+                    selectedRearCaptureKind: _debug.rearCaptureKind,
+                    activeCapturePass: _sequentialPass,
+                  ),
+                ),
+              ),
+              // Calibration HUD — Dev-only toggle; ignored for User/Clinician.
+              ListenableBuilder(
+                listenable: _debug,
+                builder: (BuildContext context, Widget? _) =>
+                    _debug.isDev && _debug.showHud
+                        ? BlocBuilder<CaptureBloc, CaptureState>(
+                            builder:
+                                (BuildContext context, CaptureState state) =>
+                                    CaptureDebugHud(
+                              state: state,
+                              hiRes: _trackingService.hiResCapture,
+                              srcRes: _trackingService.captureWidth > 0
+                                  ? '${_trackingService.captureWidth}'
+                                      'x${_trackingService.captureHeight}'
+                                  : null,
+                              photoRes: _trackingService.photoWidth > 0
+                                  ? '${_trackingService.photoWidth}'
+                                      'x${_trackingService.photoHeight}'
+                                  : null,
+                            ),
+                          )
+                        : const SizedBox.shrink(),
               ),
               Positioned(
                 top: 0,
                 right: 0,
                 child: SafeArea(
-                  child: BlocBuilder<CaptureBloc, CaptureState>(
-                    builder: (BuildContext context, CaptureState state) => Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        if (state.status == CaptureStatus.capturing)
-                          Semantics(
-                            button: true,
-                            label: 'Cancel scan',
-                            child: IconButton(
-                              tooltip: 'Cancel',
+                  child: ListenableBuilder(
+                    listenable: _debug,
+                    builder: (BuildContext context, Widget? _) =>
+                        BlocBuilder<CaptureBloc, CaptureState>(
+                      builder: (BuildContext context, CaptureState state) =>
+                          Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          if (state.status == CaptureStatus.capturing)
+                            Semantics(
+                              button: true,
+                              label: 'Cancel scan',
+                              child: IconButton(
+                                tooltip: 'Cancel',
+                                icon: const Icon(
+                                  Icons.close,
+                                  color: Colors.white70,
+                                  size: 24,
+                                ),
+                                onPressed: _cancelScan,
+                              ),
+                            ),
+                          if (_baked != null)
+                            IconButton(
+                              tooltip: 'Share model',
                               icon: const Icon(
-                                Icons.close,
+                                Icons.ios_share,
                                 color: Colors.white70,
                                 size: 24,
                               ),
-                              onPressed: _cancelScan,
+                              onPressed: () => unawaited(_shareModel()),
                             ),
-                          ),
-                        if (_baked != null)
                           IconButton(
-                            tooltip: 'Share model',
-                            icon: const Icon(
-                              Icons.ios_share,
-                              color: Colors.white70,
+                            tooltip: _baking
+                                ? 'Baking…'
+                                : (_lastSession == null
+                                    ? 'Bake (no session)'
+                                    : 'Bake'),
+                            icon: Icon(
+                              Icons.brush,
+                              color: _baking
+                                  ? ScanTheme.accent
+                                  : (_lastSession == null
+                                      ? Colors.white38
+                                      : Colors.white70),
                               size: 24,
                             ),
-                            onPressed: () => unawaited(_shareModel()),
+                            onPressed: _baking || _lastSession == null
+                                ? null
+                                : () => unawaited(_bakeTexture()),
                           ),
-                        IconButton(
-                          tooltip: 'Bake settings',
-                          icon: Icon(
-                            Icons.brush,
-                            color: _baking ? ScanTheme.accent : Colors.white70,
-                            size: 24,
-                          ),
-                          onPressed: _openBakeSettings,
-                        ),
-                        Semantics(
-                          button: true,
-                          label: 'Manage saved scans',
-                          child: IconButton(
-                            tooltip: 'Saved scans',
-                            icon: const Icon(
-                              Icons.folder_outlined,
-                              color: Colors.white70,
-                              size: 24,
+                          if (_debug.isDev)
+                            IconButton(
+                              tooltip: 'Bake settings',
+                              icon: const Icon(
+                                Icons.tune,
+                                color: Colors.white70,
+                                size: 24,
+                              ),
+                              onPressed: _openBakeSettings,
                             ),
-                            onPressed: _openScansManager,
-                          ),
-                        ),
-                        Semantics(
-                          button: true,
-                          label: 'How to scan',
-                          child: IconButton(
-                            tooltip: 'How to scan',
-                            icon: const Icon(
-                              Icons.help_outline,
-                              color: Colors.white70,
-                              size: 24,
+                          Semantics(
+                            button: true,
+                            label: 'Manage saved scans',
+                            child: IconButton(
+                              tooltip: 'Saved scans',
+                              icon: const Icon(
+                                Icons.folder_outlined,
+                                color: Colors.white70,
+                                size: 24,
+                              ),
+                              onPressed: _openScansManager,
                             ),
-                            onPressed: _showHowToScan,
                           ),
-                        ),
-                        Semantics(
-                          button: true,
-                          label: 'Settings',
-                          child: IconButton(
-                            tooltip: 'Settings',
-                            icon: const Icon(
-                              Icons.settings,
-                              color: Colors.white70,
-                              size: 24,
+                          Semantics(
+                            button: true,
+                            label: 'How to scan',
+                            child: IconButton(
+                              tooltip: 'How to scan',
+                              icon: const Icon(
+                                Icons.help_outline,
+                                color: Colors.white70,
+                                size: 24,
+                              ),
+                              onPressed: _showHowToScan,
                             ),
-                            onPressed: _openSettings,
                           ),
-                        ),
-                      ],
+                          Semantics(
+                            button: true,
+                            label: 'Settings',
+                            child: IconButton(
+                              tooltip: 'Settings',
+                              icon: const Icon(
+                                Icons.settings,
+                                color: Colors.white70,
+                                size: 24,
+                              ),
+                              onPressed: _openSettings,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1483,7 +1516,67 @@ class _CapturePageState extends State<CapturePage> {
   }
 }
 
-/// Compact trailing segmented control for settings rows.
+/// Square-bordered dropdown for settings trailing chrome.
+class _SettingsDropdown<T extends Object> extends StatelessWidget {
+  const _SettingsDropdown({
+    required this.values,
+    required this.selected,
+    required this.labelOf,
+    required this.onChanged,
+  });
+
+  final List<T> values;
+  final T selected;
+  final String Function(T) labelOf;
+  final ValueChanged<T> onChanged;
+
+  static const double _height = 36;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final Color border = scheme.onSurface.withValues(alpha: 0.22);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: border),
+      ),
+      child: SizedBox(
+        height: _height,
+        child: DropdownButtonHideUnderline(
+          child: DropdownButton<T>(
+            value: selected,
+            isDense: true,
+            borderRadius: BorderRadius.zero,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  fontSize: 13,
+                  color: scheme.onSurface,
+                ),
+            icon: Icon(
+              Icons.expand_more,
+              size: 18,
+              color: scheme.onSurface.withValues(alpha: 0.55),
+            ),
+            items: <DropdownMenuItem<T>>[
+              for (final T value in values)
+                DropdownMenuItem<T>(
+                  value: value,
+                  child: Text(labelOf(value)),
+                ),
+            ],
+            onChanged: (T? next) {
+              if (next != null) {
+                onChanged(next);
+              }
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Equal-width square segmented control for settings trailing chrome.
 class _SettingsSegmented<T extends Object> extends StatelessWidget {
   const _SettingsSegmented({
     required this.values,
@@ -1497,27 +1590,77 @@ class _SettingsSegmented<T extends Object> extends StatelessWidget {
   final String Function(T) labelOf;
   final ValueChanged<T> onChanged;
 
+  static const double _height = 36;
+  static const double _segmentWidth = 80;
+
   @override
   Widget build(BuildContext context) {
-    return SegmentedButton<T>(
-      style: const ButtonStyle(
-        visualDensity: VisualDensity.compact,
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final Color border = scheme.onSurface.withValues(alpha: 0.22);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: border),
       ),
-      showSelectedIcon: false,
-      segments: <ButtonSegment<T>>[
-        for (final T value in values)
-          ButtonSegment<T>(
-            value: value,
-            label: Text(labelOf(value), style: const TextStyle(fontSize: 12)),
+      child: SizedBox(
+        height: _height,
+        width: values.length * _segmentWidth,
+        child: Row(
+          children: <Widget>[
+            for (int i = 0; i < values.length; i++)
+              Expanded(
+                child: DecoratedBox(
+                  decoration: i == 0
+                      ? const BoxDecoration()
+                      : BoxDecoration(
+                          border: Border(
+                            left: BorderSide(color: border),
+                          ),
+                        ),
+                  child: _SettingsSegmentCell(
+                    label: labelOf(values[i]),
+                    selected: values[i] == selected,
+                    onTap: () => onChanged(values[i]),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SettingsSegmentCell extends StatelessWidget {
+  const _SettingsSegmentCell({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: selected ? ScanTheme.accent : Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Center(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              color: selected ? Colors.white : scheme.onSurface,
+            ),
           ),
-      ],
-      selected: <T>{selected},
-      onSelectionChanged: (Set<T> next) {
-        if (next.isNotEmpty) {
-          onChanged(next.first);
-        }
-      },
+        ),
+      ),
     );
   }
 }

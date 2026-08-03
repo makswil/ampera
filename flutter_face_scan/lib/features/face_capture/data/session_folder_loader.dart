@@ -15,6 +15,7 @@ import '../domain/entities/face_pose.dart';
 import '../domain/entities/saved_session.dart';
 import '../domain/entities/still_capture.dart';
 import '../domain/value_objects/pose_tolerance.dart';
+import 'session_path.dart';
 
 /// Loads a previously saved session folder back into a [CaptureSession] so the
 /// in-app baker can re-bake without a new scan. Reads `manifest.json` + PLYs +
@@ -27,7 +28,14 @@ final class SessionFolderLoader {
     Directory documents,
     String id,
   ) {
-    return load(Directory('${documents.path}/face_scans/$id'));
+    final Directory scans = Directory('${documents.path}/face_scans');
+    final Directory? dir = SessionPath.sessionDirectory(scans, id);
+    if (dir == null) {
+      return Future<({CaptureSession session, SavedSession saved})?>.value(
+        null,
+      );
+    }
+    return load(dir);
   }
 
   /// Quick disk check: frontal mesh + bake stills present (no full parse).
@@ -108,8 +116,8 @@ final class SessionFolderLoader {
         if (plyName == null) {
           continue;
         }
-        final File plyFile = File('${dir.path}/$plyName');
-        if (!plyFile.existsSync()) {
+        final File? plyFile = SessionPath.fileUnderSession(dir, plyName);
+        if (plyFile == null || !plyFile.existsSync()) {
           continue;
         }
         files.add(plyFile.path);
@@ -155,8 +163,8 @@ final class SessionFolderLoader {
         final Map<String, dynamic>? stillMap =
             poseMap['still'] as Map<String, dynamic>?;
         if (imageName != null && stillMap != null) {
-          final File imageFile = File('${dir.path}/$imageName');
-          if (imageFile.existsSync()) {
+          final File? imageFile = SessionPath.fileUnderSession(dir, imageName);
+          if (imageFile != null && imageFile.existsSync()) {
             files.add(imageFile.path);
             final Uint8List bytes = await imageFile.readAsBytes();
             final List<double> view = _doubles(stillMap['viewMatrix']);
@@ -180,8 +188,9 @@ final class SessionFolderLoader {
 
         final String? rearImageName = poseMap['rearImageFile'] as String?;
         if (rearImageName != null) {
-          final File rearFile = File('${dir.path}/$rearImageName');
-          if (rearFile.existsSync()) {
+          final File? rearFile =
+              SessionPath.fileUnderSession(dir, rearImageName);
+          if (rearFile != null && rearFile.existsSync()) {
             files.add(rearFile.path);
             final Uint8List rearBytes = await rearFile.readAsBytes();
             if (rearBytes.isNotEmpty) {
@@ -207,8 +216,12 @@ final class SessionFolderLoader {
         return null;
       }
 
-      final String id = manifest['id'] as String? ??
+      final String folderId =
           dir.uri.pathSegments.where((String s) => s.isNotEmpty).last;
+      final String rawId = manifest['id'] as String? ?? folderId;
+      // Prefer folder name when manifest id is missing or path-unsafe.
+      final String id =
+          SessionPath.isSafeSessionId(rawId) ? rawId : folderId;
       final DateTime createdAt =
           DateTime.tryParse(manifest['createdAt'] as String? ?? '') ??
               dir.statSync().modified;
@@ -236,7 +249,9 @@ final class SessionFolderLoader {
         rearCaptureKind: RearCaptureKind.fromName(
           manifest['rearCaptureKind'] as String?,
         ),
-        meshRefSessionId: manifest['meshRefSessionId'] as String?,
+        meshRefSessionId: _safeOptionalId(
+          manifest['meshRefSessionId'] as String?,
+        ),
         stabilityProfile: CaptureStabilityProfile.fromName(
           manifest['stabilityProfile'] as String?,
         ),
@@ -263,6 +278,13 @@ final class SessionFolderLoader {
       }
     }
     return null;
+  }
+
+  static String? _safeOptionalId(String? id) {
+    if (id == null || !SessionPath.isSafeSessionId(id)) {
+      return null;
+    }
+    return id;
   }
 
   static List<double> _doubles(Object? raw) => raw is List

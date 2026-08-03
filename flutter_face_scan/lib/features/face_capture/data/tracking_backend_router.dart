@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import '../domain/constants/capture_defaults.dart';
 import '../domain/entities/face_observation.dart';
 import '../domain/entities/still_capture.dart';
 import '../domain/services/face_tracking_service.dart';
@@ -146,7 +147,7 @@ final class TrackingBackendRouter implements FaceTrackingService {
   Future<WhiteBalanceResult?> correctWhiteBalance({
     required List<Uint8List> jpegs,
     bool matchFrontal = false,
-    double targetKelvin = 5600,
+    double targetKelvin = CaptureDefaults.neutralKelvin,
   }) {
     return front.correctWhiteBalance(
       jpegs: jpegs,

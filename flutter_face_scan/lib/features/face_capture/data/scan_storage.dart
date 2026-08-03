@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../domain/entities/expression_mode.dart';
+import 'session_path.dart';
 
 /// One persisted scan session on disk.
 final class ScanEntry {
@@ -11,6 +12,7 @@ final class ScanEntry {
     required this.modified,
     required this.sizeBytes,
     this.expression = ExpressionMode.neutral,
+    this.displayName,
   });
 
   /// Folder name (matches [CaptureSession.id]).
@@ -27,6 +29,18 @@ final class ScanEntry {
 
   /// Expression from `manifest.json` (defaults to neutral for legacy sessions).
   final ExpressionMode expression;
+
+  /// Optional user label from `manifest.json` (`displayName`).
+  final String? displayName;
+
+  /// Label for lists: [displayName] when set, otherwise [id].
+  String get title {
+    final String? name = displayName?.trim();
+    if (name == null || name.isEmpty) {
+      return id;
+    }
+    return name;
+  }
 }
 
 /// Lists and deletes saved scan sessions under `<root>/face_scans/`.
@@ -51,13 +65,15 @@ final class ScanStorage {
     await for (final FileSystemEntity entity in dir.list()) {
       if (entity is Directory) {
         final FileStat stat = await entity.stat();
+        final _ManifestMeta meta = await _readManifestMeta(entity);
         entries.add(
           ScanEntry(
             id: entity.uri.pathSegments.where((String s) => s.isNotEmpty).last,
             path: entity.path,
             modified: stat.modified,
             sizeBytes: await _directorySize(entity),
-            expression: await _readExpression(entity),
+            expression: meta.expression,
+            displayName: meta.displayName,
           ),
         );
       }
@@ -66,10 +82,10 @@ final class ScanStorage {
     return entries;
   }
 
-  /// Deletes a single session folder by [id]. No-op if it doesn't exist.
+  /// Deletes a single session folder by [id]. No-op if missing or [id] unsafe.
   Future<void> delete(String id) async {
-    final Directory dir = Directory('${_scansDir.path}/$id');
-    if (dir.existsSync()) {
+    final Directory? dir = SessionPath.sessionDirectory(_scansDir, id);
+    if (dir != null && dir.existsSync()) {
       await dir.delete(recursive: true);
     }
   }
@@ -81,20 +97,57 @@ final class ScanStorage {
     }
   }
 
-  Future<ExpressionMode> _readExpression(Directory dir) async {
+  /// Sets or clears the session's display name in `manifest.json`.
+  ///
+  /// Empty / whitespace [displayName] removes the field (UI falls back to [id]).
+  /// Folder id stays unchanged so Prior-mesh refs keep working.
+  Future<void> rename(String id, String displayName) async {
+    final Directory? dir = SessionPath.sessionDirectory(_scansDir, id);
+    if (dir == null) {
+      return;
+    }
     final File manifest = File('${dir.path}/manifest.json');
     if (!manifest.existsSync()) {
-      return ExpressionMode.neutral;
+      return;
+    }
+    try {
+      final Object? decoded = jsonDecode(await manifest.readAsString());
+      if (decoded is! Map<String, dynamic>) {
+        return;
+      }
+      final String trimmed = displayName.trim();
+      if (trimmed.isEmpty) {
+        decoded.remove('displayName');
+      } else {
+        decoded['displayName'] = trimmed;
+      }
+      await manifest.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(decoded),
+      );
+    } on Object {
+      // Corrupt / unreadable → leave as-is.
+    }
+  }
+
+  Future<_ManifestMeta> _readManifestMeta(Directory dir) async {
+    final File manifest = File('${dir.path}/manifest.json');
+    if (!manifest.existsSync()) {
+      return const _ManifestMeta();
     }
     try {
       final Object? decoded = jsonDecode(await manifest.readAsString());
       if (decoded is Map<String, dynamic>) {
-        return ExpressionMode.fromName(decoded['expression'] as String?);
+        final String? rawName = decoded['displayName'] as String?;
+        final String? name = rawName?.trim();
+        return _ManifestMeta(
+          expression: ExpressionMode.fromName(decoded['expression'] as String?),
+          displayName: (name == null || name.isEmpty) ? null : name,
+        );
       }
     } on Object {
-      // Corrupt / unreadable → treat as neutral.
+      // Corrupt / unreadable → defaults.
     }
-    return ExpressionMode.neutral;
+    return const _ManifestMeta();
   }
 
   Future<int> _directorySize(Directory dir) async {
@@ -106,4 +159,14 @@ final class ScanStorage {
     }
     return total;
   }
+}
+
+final class _ManifestMeta {
+  const _ManifestMeta({
+    this.expression = ExpressionMode.neutral,
+    this.displayName,
+  });
+
+  final ExpressionMode expression;
+  final String? displayName;
 }

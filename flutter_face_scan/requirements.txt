@@ -1,7 +1,0 @@
-# Minimal inference dependencies.
-# CPU-only torch (smaller): pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cpu
-torch>=2.0.0
-pillow>=9.0.0
-pyyaml>=6.0
-numpy>=1.24.0
-colour-science>=0.4.0

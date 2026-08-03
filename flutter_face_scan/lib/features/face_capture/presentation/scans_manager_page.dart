@@ -64,6 +64,22 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
     await _load();
   }
 
+  Future<void> _rename(ScanEntry entry) async {
+    final String? next = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) => _RenameScanDialog(
+        initialName: entry.displayName ?? entry.title,
+        placeholder: entry.id,
+      ),
+    );
+    if (next == null) {
+      return;
+    }
+    await _storage?.rename(entry.id, next);
+    await _load();
+  }
+
   Future<void> _deleteAll() async {
     final bool confirmed = await _confirm('Delete all scans?');
     if (!confirmed) {
@@ -124,21 +140,32 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
               itemBuilder: (BuildContext context, int index) {
                 final ScanEntry entry = _entries[index];
                 return ListTile(
-                  title: Text(entry.id),
+                  title: Text(entry.title),
                   subtitle: Text(
                     '${entry.expression.label} · '
                     '${_formatSize(entry.sizeBytes)} · '
-                    '${_formatDate(entry.modified)}',
+                    '${_formatDate(entry.modified)}'
+                    '${entry.displayName == null ? '' : ' · ${entry.id}'}',
                   ),
                   onTap: pick
                       ? () => Navigator.pop(context, entry.id)
                       : null,
                   trailing: pick
                       ? const Icon(Icons.chevron_right)
-                      : IconButton(
-                          tooltip: 'Delete',
-                          icon: const Icon(Icons.delete_outline),
-                          onPressed: () => _deleteOne(entry),
+                      : Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            IconButton(
+                              tooltip: 'Rename',
+                              icon: const Icon(Icons.edit_outlined),
+                              onPressed: () => unawaited(_rename(entry)),
+                            ),
+                            IconButton(
+                              tooltip: 'Delete',
+                              icon: const Icon(Icons.delete_outline),
+                              onPressed: () => unawaited(_deleteOne(entry)),
+                            ),
+                          ],
                         ),
                 );
               },
@@ -159,5 +186,87 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
   static String _formatDate(DateTime d) {
     String two(int n) => n.toString().padLeft(2, '0');
     return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
+  }
+}
+
+/// Owns the text controller so keyboard insets / rebuilds don't reset the caret.
+class _RenameScanDialog extends StatefulWidget {
+  const _RenameScanDialog({
+    required this.initialName,
+    required this.placeholder,
+  });
+
+  final String initialName;
+  final String placeholder;
+
+  @override
+  State<_RenameScanDialog> createState() => _RenameScanDialogState();
+}
+
+class _RenameScanDialogState extends State<_RenameScanDialog> {
+  late final TextEditingController _controller;
+  late final FocusNode _focusNode;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialName);
+    _focusNode = FocusNode();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _focusNode.requestFocus();
+      _controller.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _controller.text.length,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _submit() => Navigator.pop(context, _controller.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Rename'),
+      content: TextField(
+        controller: _controller,
+        focusNode: _focusNode,
+        autofocus: true,
+        keyboardType: TextInputType.text,
+        textInputAction: TextInputAction.done,
+        textCapitalization: TextCapitalization.sentences,
+        autocorrect: false,
+        enableSuggestions: false,
+        smartDashesType: SmartDashesType.disabled,
+        smartQuotesType: SmartQuotesType.disabled,
+        decoration: InputDecoration(
+          hintText: widget.placeholder,
+          labelText: 'Name',
+          border: const OutlineInputBorder(
+            borderRadius: BorderRadius.zero,
+          ),
+        ),
+        onSubmitted: (_) => _submit(),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: _submit,
+          child: const Text('Save'),
+        ),
+      ],
+    );
   }
 }

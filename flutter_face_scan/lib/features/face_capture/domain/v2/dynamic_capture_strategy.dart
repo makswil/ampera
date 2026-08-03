@@ -6,7 +6,7 @@ import '../entities/face_observation.dart';
 /// V2 — Dynamic (expression) Capture — INTERFACE STUB
 /// ============================================================================
 ///
-/// Goal: extend V1 with captures under changing facial expressions (mimik).
+/// Goal: extend V1 with captures under changing facial expressions.
 ///
 /// DESIGN EVALUATION — short video sequences vs. a series of blendshape-keyed
 /// snapshots (to be decided before implementation):

@@ -9,6 +9,7 @@ import '../domain/entities/face_blendshape.dart';
 import '../domain/entities/saved_session.dart';
 import '../domain/entities/still_capture.dart';
 import '../domain/services/snapshot_repository.dart';
+import 'session_path.dart';
 
 /// Writes a [CaptureSession] to the file system: one ASCII-PLY point cloud per
 /// pose (face-local vertices, metres) plus a `manifest.json` describing the
@@ -26,7 +27,8 @@ final class FileSnapshotRepository implements SnapshotRepository {
 
   @override
   Future<SavedSession> save(CaptureSession session) async {
-    final Directory dir = Directory('${_root.path}/face_scans/${session.id}');
+    final String id = SessionPath.requireSafeSessionId(session.id);
+    final Directory dir = Directory('${_root.path}/face_scans/$id');
     await dir.create(recursive: true);
 
     final List<String> files = <String>[];
@@ -75,7 +77,7 @@ final class FileSnapshotRepository implements SnapshotRepository {
       (StillCapture s) => s.bytes.isNotEmpty,
     );
     final Map<String, Object?> manifest = <String, Object?>{
-      'id': session.id,
+      'id': id,
       'createdAt': session.createdAt.toIso8601String(),
       'schemaVersion': 4,
       'expression': session.expression.name,
@@ -84,13 +86,15 @@ final class FileSnapshotRepository implements SnapshotRepository {
       'meshMotion': session.meshMotion.name,
       'clinicianCamera': session.clinicianCamera.name,
       'rearCaptureKind': session.rearCaptureKind.name,
-      if (session.meshRefSessionId != null)
+      if (session.meshRefSessionId != null &&
+          SessionPath.isSafeSessionId(session.meshRefSessionId!))
         'meshRefSessionId': session.meshRefSessionId,
       'stabilityProfile': session.stabilityProfile.name,
       'meshPass': <String, Object?>{
         'camera': 'front',
         'meshMotion': session.meshMotion.name,
-        if (session.meshRefSessionId != null)
+        if (session.meshRefSessionId != null &&
+            SessionPath.isSafeSessionId(session.meshRefSessionId!))
           'refSessionId': session.meshRefSessionId,
       },
       if (hasRearPass)
@@ -110,7 +114,7 @@ final class FileSnapshotRepository implements SnapshotRepository {
     files.add(manifestFile.path);
 
     return SavedSession(
-      id: session.id,
+      id: id,
       directoryPath: dir.path,
       manifestPath: manifestFile.path,
       files: files,

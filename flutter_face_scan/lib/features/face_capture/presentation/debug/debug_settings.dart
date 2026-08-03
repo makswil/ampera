@@ -1,22 +1,15 @@
 import 'package:flutter/foundation.dart';
 
+import '../../domain/constants/capture_defaults.dart';
 import '../../domain/entities/capture_actor_mode.dart';
 import '../../domain/value_objects/pose_tolerance.dart';
 
-/// Dev-only chrome (bake sheet, HUD/mesh, texture toggles, manage-scans).
-/// Off in release/profile so end users only see the scan flow + one setting.
-const bool kShowDevMenu = kDebugMode;
-
-/// Runtime-toggleable debug flags, so the calibration HUD / mesh overlay can be
-/// switched on the device without a rebuild. Seeded from the compile-time
-/// `--dart-define` flags so those still act as defaults.
+/// Runtime-toggleable debug flags and product scan-mode picks.
 ///
-/// Also holds product scan-mode picks (actor / camera / rear kind) so the
-/// settings page can rebuild via [ListenableBuilder].
+/// Defaults live here; the Settings UI flips them at runtime (no rebuild,
+/// no compile-time flags).
 class DebugSettings extends ChangeNotifier {
   DebugSettings({
-    bool? showHud,
-    bool? showMesh,
     bool? fillHoles,
     bool? hiResPhoto,
     bool? lockAeAwb,
@@ -28,6 +21,7 @@ class DebugSettings extends ChangeNotifier {
     double? targetDistanceMeters,
     bool? mlWb,
     bool? mlWbMatchFrontal,
+    AppRole? appRole,
     CaptureActorMode? actorMode,
     PractitionerFlow? practitionerFlow,
     MeshMotionMode? meshMotion,
@@ -35,9 +29,7 @@ class DebugSettings extends ChangeNotifier {
     RearCaptureKind? rearCaptureKind,
     String? meshRefSessionId,
     CaptureStabilityProfile? stabilityProfile,
-  }) : _showHud = showHud ?? false,
-       _showMesh = showMesh ?? false,
-       _fillHoles = fillHoles ?? true,
+  }) : _fillHoles = fillHoles ?? true,
        _hiResPhoto = hiResPhoto ?? true,
        _lockAeAwb = lockAeAwb ?? true,
        _chinUpLowerFace = chinUpLowerFace ?? true,
@@ -53,7 +45,10 @@ class DebugSettings extends ChangeNotifier {
            ),
        _mlWb = mlWb ?? true,
        _mlWbMatchFrontal = mlWbMatchFrontal ?? false,
-       _actorMode = actorMode ?? CaptureActorMode.user,
+       _appRole = appRole ?? AppRole.user,
+       _actorMode = actorMode ??
+           (appRole ?? AppRole.user).lockedActorMode ??
+           CaptureActorMode.user,
        _practitionerFlow = practitionerFlow ?? PractitionerFlow.meshThenPhotos,
        _meshMotion = meshMotion ?? MeshMotionMode.device,
        _clinicianCamera = clinicianCamera ?? ClinicianCamera.front,
@@ -62,8 +57,8 @@ class DebugSettings extends ChangeNotifier {
        _stabilityProfile =
            stabilityProfile ?? CaptureStabilityProfile.handheld;
 
-  bool _showHud;
-  bool _showMesh;
+  bool _showHud = false;
+  bool _showMesh = false;
   bool _fillHoles;
   bool _hiResPhoto;
   bool _lockAeAwb;
@@ -75,6 +70,7 @@ class DebugSettings extends ChangeNotifier {
   double _targetDistanceMeters;
   bool _mlWb;
   bool _mlWbMatchFrontal;
+  AppRole _appRole;
   CaptureActorMode _actorMode;
   PractitionerFlow _practitionerFlow;
   MeshMotionMode _meshMotion;
@@ -83,7 +79,10 @@ class DebugSettings extends ChangeNotifier {
   String? _meshRefSessionId;
   CaptureStabilityProfile _stabilityProfile;
 
+  /// Calibration HUD (Dev settings). Default off.
   bool get showHud => _showHud;
+
+  /// Native face-mesh + symmetry-axis overlay. Default off.
   bool get showMesh => _showMesh;
 
   /// Whether the open eye/mouth holes are capped + textured (on) or left as
@@ -131,8 +130,15 @@ class DebugSettings extends ChangeNotifier {
   bool get mlWb => _mlWb;
 
   /// Only when [mlWb] is on: `true` = all poses → frontal still's estimated
-  /// Kelvin; `false` (default) = all poses → neutral 5600 K. Re-bake to apply.
+  /// Kelvin; `false` (default) = all poses → [CaptureDefaults.neutralKelvin].
+  /// Re-bake to apply.
   bool get mlWbMatchFrontal => _mlWbMatchFrontal;
+
+  /// Product UI role (User / Clinician / Dev) — gates settings chrome.
+  AppRole get appRole => _appRole;
+
+  /// True when [appRole] is [AppRole.developer].
+  bool get isDev => _appRole == AppRole.developer;
 
   /// Who operates the device (User vs Clinician).
   CaptureActorMode get actorMode => _actorMode;
@@ -250,9 +256,31 @@ class DebugSettings extends ChangeNotifier {
     }
   }
 
+  set appRole(AppRole value) {
+    if (value == _appRole) {
+      return;
+    }
+    _appRole = value;
+    final CaptureActorMode? locked = value.lockedActorMode;
+    if (locked != null) {
+      _actorMode = locked;
+    }
+    // Tripod/stability is clinician-only; User falls back to handheld.
+    if (_actorMode != CaptureActorMode.practitioner) {
+      _stabilityProfile = CaptureStabilityProfile.handheld;
+    }
+    notifyListeners();
+  }
+
   set actorMode(CaptureActorMode value) {
-    if (value != _actorMode) {
-      _actorMode = value;
+    // Non-dev roles keep actor locked to the role.
+    final CaptureActorMode? locked = _appRole.lockedActorMode;
+    final CaptureActorMode next = locked ?? value;
+    if (next != _actorMode) {
+      _actorMode = next;
+      if (next != CaptureActorMode.practitioner) {
+        _stabilityProfile = CaptureStabilityProfile.handheld;
+      }
       notifyListeners();
     }
   }

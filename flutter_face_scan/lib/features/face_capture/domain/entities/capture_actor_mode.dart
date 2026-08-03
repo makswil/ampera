@@ -1,3 +1,42 @@
+/// UI / product role that gates settings chrome and toolbar tools.
+///
+/// Distinct from [CaptureActorMode]: User/Clinician also lock the scan actor;
+/// Dev keeps [CaptureActorMode] free so both flows stay testable.
+enum AppRole {
+  /// Patient self-scan; clean settings.
+  user(label: 'User'),
+
+  /// Clinic operator; clinician scan options visible.
+  clinician(label: 'Clinician'),
+
+  /// Developer: all toggles, bake settings, and scan-operator picker.
+  developer(label: 'Dev');
+
+  const AppRole({required this.label});
+
+  /// Short UI label for pickers.
+  final String label;
+
+  /// Locked [CaptureActorMode] for this role, or null when Dev (free pick).
+  CaptureActorMode? get lockedActorMode => switch (this) {
+        AppRole.user => CaptureActorMode.user,
+        AppRole.clinician => CaptureActorMode.practitioner,
+        AppRole.developer => null,
+      };
+
+  static AppRole fromName(String? name) {
+    if (name == null || name.isEmpty) {
+      return AppRole.user;
+    }
+    for (final AppRole role in AppRole.values) {
+      if (role.name == name) {
+        return role;
+      }
+    }
+    return AppRole.user;
+  }
+}
+
 /// Who operates the device during a guided scan.
 enum CaptureActorMode {
   /// Patient holds the device and moves their head (legacy / default).

@@ -61,13 +61,18 @@ ios/Runner/GeneratedPluginRegistrant.*
 # Generated at build/run (not source)
 **/GeneratedPluginRegistrant.*
 
-# ml-wb white-balance bridge (tool/ml_wb_correct.py): local Python venv +
-# per-session corrected-still cache. Not source.
-tool/.venv-mlwb/
-**/.mlwb_cache/
-
-# Local full-session dumps for bake QA (jpg/ply/obj) — keep frontal.ply.
-tool/reference/session_*/
+# Secrets / signing — never commit credentials or store keystores.
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pem
+key.properties
+**/google-services.json
+**/GoogleService-Info.plist
+android/app/upload-keystore.jks
 
 # Uncomment to exclude tests from this repo:
 #/test/

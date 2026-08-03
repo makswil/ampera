@@ -16,7 +16,6 @@ analyzer:
     - "**/*.g.dart"
     - "**/*.freezed.dart"
     - build/**
-    - tool/** # standalone dev scripts, not shipped
 
 linter:
   rules:

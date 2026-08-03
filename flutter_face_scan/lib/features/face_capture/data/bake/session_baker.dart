@@ -54,7 +54,7 @@ final class BakedTexture {
 }
 
 /// In-app bake (isolate) from the in-memory [CaptureSession]; writes OBJ+MTL+PNG
-/// into the session dir. Same pipeline as `tool/bake_texture.dart`. Null if the
+/// into the session dir (on-device bake). Null if the
 /// three poses / stills aren't all present.
 final class SessionTextureBaker {
   const SessionTextureBaker();

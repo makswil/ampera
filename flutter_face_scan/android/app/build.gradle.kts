@@ -15,20 +15,35 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+        // Replace before Play Store / enterprise export (must be unique).
         applicationId = "com.example.flutter_face_scan"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
 
+    // Optional release signing: create `android/key.properties` (gitignored) with
+    // storeFile / storePassword / keyAlias / keyPassword, then uncomment below.
+    // val keystorePropertiesFile = rootProject.file("key.properties")
+    // val keystoreProperties = java.util.Properties()
+    // if (keystorePropertiesFile.exists()) {
+    //     keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+    // }
+    // signingConfigs {
+    //     create("release") {
+    //         keyAlias = keystoreProperties["keyAlias"] as String
+    //         keyPassword = keystoreProperties["keyPassword"] as String
+    //         storeFile = file(keystoreProperties["storeFile"] as String)
+    //         storePassword = keystoreProperties["storePassword"] as String
+    //     }
+    // }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
+            // Debug signing keeps `flutter run --release` working locally.
+            // For store export: wire signingConfigs.release (see above) and
+            // set signingConfig = signingConfigs.getByName("release").
             signingConfig = signingConfigs.getByName("debug")
         }
     }
