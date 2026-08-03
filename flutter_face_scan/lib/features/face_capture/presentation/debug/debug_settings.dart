@@ -110,15 +110,15 @@ class DebugSettings extends ChangeNotifier {
 
   /// Only relevant when [viewDependent] is on: `true` = best-only (single
   /// highest-`n·v` pose per texel → sharp; hard seams possible).
-  /// `false` (default) = weighted blend (smoother colour). Re-bake to apply.
+  /// `false` (default) = weighted blend (smoother colour). Generate again to apply.
   bool get viewBestOnly => _viewBestOnly;
 
   /// Only when [viewDependent] is on: Dart `poseGain` — match each pose's mean
-  /// RGB to frontal over their overlap. Default off (A/B with ml-wb). Re-bake.
+  /// RGB to frontal over their overlap. Default off (A/B with ml-wb). Generate again.
   bool get dartColorGain => _dartColorGain;
 
   /// Bake an object-space normal map (`*_n.png`) from the TrueDepth face mesh
-  /// into the UV atlas. Default off. Re-bake to apply.
+  /// into the UV atlas. Default off. Generate again to apply.
   bool get bakeNormalMap => _bakeNormalMap;
 
   /// Target camera↔face distance for the face-frame gate (metres). Closer =
@@ -126,12 +126,12 @@ class DebugSettings extends ChangeNotifier {
   double get targetDistanceMeters => _targetDistanceMeters;
 
   /// On-device ml-wb CoreML white-balance on pose stills before bake. Default
-  /// on. Re-bake to apply.
+  /// on. Generate again to apply.
   bool get mlWb => _mlWb;
 
   /// Only when [mlWb] is on: `true` = all poses → frontal still's estimated
   /// Kelvin; `false` (default) = all poses → [CaptureDefaults.neutralKelvin].
-  /// Re-bake to apply.
+  /// Generate again to apply.
   bool get mlWbMatchFrontal => _mlWbMatchFrontal;
 
   /// Product UI role (User / Clinician / Dev) — gates settings chrome.

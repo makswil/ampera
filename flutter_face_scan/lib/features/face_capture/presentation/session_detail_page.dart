@@ -7,6 +7,7 @@ import '../data/arkit_face_tracking_service.dart';
 import '../data/scan_storage.dart';
 import '../domain/entities/capture_actor_mode.dart';
 import 'obj_model_viewer_page.dart';
+import 'scan_format.dart';
 
 /// Lists files for one saved session; tap opens a preview.
 ///
@@ -99,8 +100,8 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
                   leading: Icon(_iconFor(file)),
                   title: Text(file.name),
                   subtitle: Text(
-                    '${_formatSize(file.sizeBytes)} · '
-                    '${_formatDate(file.modified)}',
+                    '${ScanFormat.size(file.sizeBytes)} · '
+                    '${ScanFormat.date(file.modified)}',
                   ),
                   trailing: const Icon(Icons.visibility_outlined),
                   onTap: () => unawaited(_open(file)),
@@ -127,20 +128,5 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
       default:
         return Icons.insert_drive_file_outlined;
     }
-  }
-
-  static String _formatSize(int bytes) {
-    if (bytes >= 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    if (bytes >= 1024) {
-      return '${(bytes / 1024).toStringAsFixed(0)} KB';
-    }
-    return '$bytes B';
-  }
-
-  static String _formatDate(DateTime d) {
-    String two(int n) => n.toString().padLeft(2, '0');
-    return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
   }
 }

@@ -43,7 +43,7 @@ class CaptureOverlay extends StatelessWidget {
   final VoidCallback? onStart;
   final VoidCallback? onRetake;
 
-  /// Bake the last saved session into a textured 3D model.
+  /// Build a textured 3D model from the last saved session.
   final VoidCallback? onGenerateModel;
 
   /// True when a bakeable session is loaded (enables Generate after scan).

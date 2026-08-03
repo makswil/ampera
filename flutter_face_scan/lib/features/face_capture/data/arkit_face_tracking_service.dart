@@ -180,7 +180,8 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     });
   }
 
-  /// Opens a session file in a native preview (OBJ → SceneKit, else Quick Look).
+  /// Opens a session file preview. OBJ uses the in-app SceneKit viewer;
+  /// other types use native Quick Look.
   Future<void> previewFile(String path) async {
     await _control.invokeMethod<void>('previewFile', <String, Object?>{
       'path': path,

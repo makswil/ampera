@@ -8,6 +8,7 @@ import '../data/scan_storage.dart';
 import '../data/session_folder_loader.dart';
 import '../domain/entities/capture_actor_mode.dart';
 import 'obj_model_viewer_page.dart';
+import 'scan_format.dart';
 import 'session_detail_page.dart';
 
 /// Lists saved scan sessions and lets the user open, rename, or delete them.
@@ -163,8 +164,8 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
   String _subtitle(ScanEntry entry) {
     if (_isDev) {
       return '${entry.expression.label} · '
-          '${_formatSize(entry.sizeBytes)} · '
-          '${_formatDate(entry.modified)}'
+          '${ScanFormat.size(entry.sizeBytes)} · '
+          '${ScanFormat.date(entry.modified)}'
           '${entry.displayName == null ? '' : ' · ${entry.id}'}';
     }
     return entry.expression.label;
@@ -238,21 +239,6 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
               },
             ),
     );
-  }
-
-  static String _formatSize(int bytes) {
-    if (bytes >= 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    if (bytes >= 1024) {
-      return '${(bytes / 1024).toStringAsFixed(0)} KB';
-    }
-    return '$bytes B';
-  }
-
-  static String _formatDate(DateTime d) {
-    String two(int n) => n.toString().padLeft(2, '0');
-    return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
   }
 }
 

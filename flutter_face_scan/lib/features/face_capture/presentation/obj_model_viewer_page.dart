@@ -38,16 +38,23 @@ class ObjModelViewerPage extends StatefulWidget {
 class _ObjModelViewerPageState extends State<ObjModelViewerPage> {
   /// Brief load veil so the platform view doesn't flash empty.
   bool _showLoading = true;
+  Timer? _loadingTimer;
 
   @override
   void initState() {
     super.initState();
     // Native load is async; veil lifts after a short beat (mesh usually ready).
-    Timer(const Duration(milliseconds: 700), () {
+    _loadingTimer = Timer(const Duration(milliseconds: 700), () {
       if (mounted) {
         setState(() => _showLoading = false);
       }
     });
+  }
+
+  @override
+  void dispose() {
+    _loadingTimer?.cancel();
+    super.dispose();
   }
 
   @override

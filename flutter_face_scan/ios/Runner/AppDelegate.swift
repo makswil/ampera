@@ -1035,8 +1035,9 @@ private func faceScanIsShareablePath(_ path: String) -> Bool {
     return false
   }
   let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+  let docsRoot = docs.resolvingSymlinksInPath().standardizedFileURL
   let allowedRoots = [
-    docs.appendingPathComponent("face_scans", isDirectory: true).path,
+    docsRoot.appendingPathComponent("face_scans", isDirectory: true).path,
     fm.temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL.path,
   ]
   return allowedRoots.contains { root in
@@ -1243,8 +1244,14 @@ private func faceScanApplyBakeTextures(to scene: SCNScene, objURL: URL) {
   let mtlMaps = faceScanMtlMaps(from: dir.appendingPathComponent("\(stem).mtl"))
 
   func sibling(_ name: String?) -> URL? {
-    guard let name, !name.isEmpty else { return nil }
+    guard let name, !name.isEmpty, name != ".", name != ".." else { return nil }
+    // Basename only — reject path separators / traversal.
+    guard !name.contains("/") && !name.contains("\\") else { return nil }
     let url = dir.appendingPathComponent(name)
+    let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
+    let root = dir.resolvingSymlinksInPath().standardizedFileURL.path
+    let prefix = root.hasSuffix("/") ? root : root + "/"
+    guard resolved == root || resolved.hasPrefix(prefix) else { return nil }
     return FileManager.default.fileExists(atPath: url.path) ? url : nil
   }
 

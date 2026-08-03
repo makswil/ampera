@@ -57,10 +57,10 @@ File-level map of the feature: [`lib/features/face_capture/README.md`](lib/featu
 - Guided capture: frontal → left → right → chin-up (hold gate + flash feedback)
 - Clinician / user roles; front TrueDepth mesh; optional rear photo/video pass
 - Session save: PLY + JPEG + `manifest.json` under `Documents/face_scans/`
-- Texture bake (view-dependent `n·v`, hole fill, optional normal map)
-- ml-wb CoreML white-balance before bake
-- Share sheet for baked OBJ/MTL/PNG
-- Runtime settings (role, distance, bake toggles)
+- Texture bake / Generate 3D (view-dependent `n·v`, eye fill, optional normal map)
+- Embedded SceneKit OBJ viewer + share sheet
+- ml-wb CoreML white-balance before generate
+- Runtime settings (role, distance, model toggles)
 
 ---
 

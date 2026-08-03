@@ -123,20 +123,26 @@ final class ScanStorage {
 
     final List<ScanEntry> entries = <ScanEntry>[];
     await for (final FileSystemEntity entity in dir.list()) {
-      if (entity is Directory) {
-        final FileStat stat = await entity.stat();
-        final _ManifestMeta meta = await _readManifestMeta(entity);
-        entries.add(
-          ScanEntry(
-            id: entity.uri.pathSegments.where((String s) => s.isNotEmpty).last,
-            path: entity.path,
-            modified: stat.modified,
-            sizeBytes: await _directorySize(entity),
-            expression: meta.expression,
-            displayName: meta.displayName,
-          ),
-        );
+      if (entity is! Directory) {
+        continue;
       }
+      final String id =
+          entity.uri.pathSegments.where((String s) => s.isNotEmpty).last;
+      if (!SessionPath.isSafeSessionId(id)) {
+        continue;
+      }
+      final FileStat stat = await entity.stat();
+      final _ManifestMeta meta = await _readManifestMeta(entity);
+      entries.add(
+        ScanEntry(
+          id: id,
+          path: entity.path,
+          modified: stat.modified,
+          sizeBytes: await _directorySize(entity),
+          expression: meta.expression,
+          displayName: meta.displayName,
+        ),
+      );
     }
     entries.sort((ScanEntry a, ScanEntry b) => b.modified.compareTo(a.modified));
     return entries;

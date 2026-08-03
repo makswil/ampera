@@ -1,6 +1,6 @@
 import 'package:vector_math/vector_math_64.dart';
 
-/// Wavefront OBJ + MTL for a textured mesh. Pure; shared by app + tool.
+/// Wavefront OBJ + MTL for a textured mesh. Pure Dart (runs in bake isolate).
 /// `vt` = `(u, 1-v)` (PNG is top-left origin, OBJ samples bottom-left). `vn`
 /// emitted only when [normals] is non-empty.
 String renderObj({

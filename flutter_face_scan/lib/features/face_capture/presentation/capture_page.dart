@@ -92,7 +92,7 @@ class _CapturePageState extends State<CapturePage> {
   CaptureSession? _lastSession;
   Directory? _lastDir;
   bool _baking = false;
-  // Bake timing / ml-wb notes go to console — not the guidance surface.
+  // Generate timing / ml-wb notes go to console — not the guidance surface.
 
   /// Paths of the last baked model (obj/mtl/png), for the share sheet.
   BakedTexture? _baked;
@@ -322,7 +322,7 @@ class _CapturePageState extends State<CapturePage> {
     }
   }
 
-  /// Restores the newest on-disk session so Bake works without a fresh scan.
+  /// Restores the newest on-disk session so Generate works without a fresh scan.
   Future<void> _loadNewestSession() async {
     try {
       final Directory documents = await getApplicationDocumentsDirectory();
@@ -340,7 +340,7 @@ class _CapturePageState extends State<CapturePage> {
         _lastDir = Directory(loaded.saved.directoryPath);
       });
     } on Object {
-      // No saved session / unloadable — Bake stays hidden.
+      // No saved session / unloadable — Generate stays hidden.
     }
   }
 
@@ -774,13 +774,13 @@ class _CapturePageState extends State<CapturePage> {
 
   void _openBakeSettings() {
     unawaited(_openSettingsPage(
-      title: 'Bake settings',
+      title: 'Model settings',
       buildChildren: () => <Widget>[
         SwitchListTile(
           title: const Text('ml-wb white balance'),
           subtitle: const Text(
             'CoreML white-balance on pose stills before bake. '
-            'Re-bake to apply.',
+            'Generate again to apply.',
           ),
           value: _debug.mlWb,
           onChanged: (bool v) => _debug.mlWb = v,
@@ -818,7 +818,7 @@ class _CapturePageState extends State<CapturePage> {
           title: const Text('View-dependent blend (n·v)'),
           subtitle: const Text(
             'On = pick the photo that saw each surface most head-on. '
-            'Off = static region tables. Re-bake to apply.',
+            'Off = static region tables. Generate again to apply.',
           ),
           value: _debug.viewDependent,
           onChanged: (bool v) => _debug.viewDependent = v,
@@ -851,7 +851,7 @@ class _CapturePageState extends State<CapturePage> {
           title: const Text('Normal map (TrueDepth mesh)'),
           subtitle: const Text(
             'On = bake *_n.png (object-space). Assign as Normal Map in the '
-            'viewer — not as Bump/Height (that washes the face white). Re-bake.',
+            'viewer — not as Bump/Height (that washes the face white). Generate again.',
           ),
           value: _debug.bakeNormalMap,
           onChanged: (bool v) => _debug.bakeNormalMap = v,
@@ -865,7 +865,7 @@ class _CapturePageState extends State<CapturePage> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               : const Icon(Icons.brush),
-          title: Text(_baking ? 'Baking…' : 'Bake now'),
+          title: Text(_baking ? 'Generating…' : 'Generate now'),
           subtitle: Text(
             _lastSession == null
                 ? 'No session loaded'
@@ -1056,7 +1056,7 @@ class _CapturePageState extends State<CapturePage> {
           _baked = null;
         });
       }
-      // No auto-bake: user tweaks bake settings first, then taps Bake.
+      // No auto-generate: user tweaks model settings first, then taps Generate.
     } on Object {
       if (mounted) {
         setState(() => _saving = false);
@@ -1064,8 +1064,9 @@ class _CapturePageState extends State<CapturePage> {
     }
   }
 
-  /// Bakes (or re-bakes) the last saved session's texture with the current bake
-  /// settings. No-op if nothing is saved yet or a bake is already running.
+  /// Generates (or regenerates) the last saved session's textured model with
+  /// the current model settings. No-op if nothing is saved yet or a generate
+  /// is already running.
   Future<void> _bakeTexture() async {
     final CaptureSession? session = _lastSession;
     final Directory? dir = _lastDir;
@@ -1118,7 +1119,7 @@ class _CapturePageState extends State<CapturePage> {
         });
       }
     } on Object catch (e) {
-      faceScanLog('Bake failed: $e');
+      faceScanLog('Generate failed: $e');
       if (mounted) {
         setState(() {
           _baking = false;
@@ -1417,7 +1418,7 @@ class _CapturePageState extends State<CapturePage> {
                       children: <Widget>[
                         if (_debug.isDev)
                           IconButton(
-                            tooltip: 'Bake settings',
+                            tooltip: 'Model settings',
                             style: _chromeIconButtonStyle,
                             icon: const Icon(
                               Icons.tune,
@@ -1528,7 +1529,7 @@ class _CapturePageState extends State<CapturePage> {
           ? 'Photos · prior mesh'
           : 'Pass 2/2 · rear';
     }
-    // Bake / ml-wb timing stays in the bake sheet + console — not on the
+    // Generate / ml-wb timing stays in the model sheet + console — not on the
     // consumer guidance surface.
     return null;
   }
