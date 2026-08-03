@@ -108,3 +108,70 @@ abstract final class FaceHorizontalAxis {
     600, 601, 785, 821, 1044, 1027, 1008, 1000, 730,
   ];
 }
+
+/// Explicit eye-hole fill topology for ARKit's open eye apertures.
+///
+/// Author-provided triangles on existing verts only (no centroid, no rim
+/// flatten). Mouth stays open. Side naming matches [FaceRegions]: left =
+/// negative local X (anatomical left).
+abstract final class FaceHoleGeometry {
+  const FaceHoleGeometry._();
+
+  /// Left eye (indices 1085–1108), 22 triangles, flat `[a,b,c, …]`.
+  static const List<int> leftEyeTriangles = <int>[
+    1088, 1089, 1090,
+    1088, 1090, 1091,
+    1087, 1088, 1091,
+    1087, 1091, 1092,
+    1086, 1087, 1092,
+    1086, 1092, 1093,
+    1085, 1086, 1093,
+    1085, 1093, 1094,
+    1108, 1085, 1094,
+    1108, 1094, 1095,
+    1107, 1108, 1095,
+    1107, 1095, 1096,
+    1106, 1107, 1096,
+    1106, 1096, 1097,
+    1105, 1106, 1097,
+    1105, 1097, 1098,
+    1104, 1105, 1098,
+    1104, 1098, 1099,
+    1103, 1104, 1099,
+    1103, 1099, 1100,
+    1102, 1103, 1100,
+    1100, 1101, 1102,
+  ];
+
+  /// Right eye (indices 1061–1084), 22 triangles, flat `[a,b,c, …]`.
+  static const List<int> rightEyeTriangles = <int>[
+    1080, 1081, 1082,
+    1079, 1080, 1082,
+    1079, 1082, 1083,
+    1078, 1079, 1083,
+    1078, 1083, 1084,
+    1077, 1078, 1084,
+    1061, 1077, 1084,
+    1061, 1076, 1077,
+    1061, 1062, 1076,
+    1062, 1075, 1076,
+    1062, 1063, 1075,
+    1063, 1074, 1075,
+    1063, 1064, 1074,
+    1064, 1073, 1074,
+    1064, 1065, 1073,
+    1065, 1072, 1073,
+    1065, 1066, 1072,
+    1066, 1071, 1072,
+    1066, 1067, 1071,
+    1067, 1070, 1071,
+    1067, 1068, 1070,
+    1068, 1069, 1070,
+  ];
+
+  /// Both eyes concatenated (left then right).
+  static const List<int> eyeTriangles = <int>[
+    ...leftEyeTriangles,
+    ...rightEyeTriangles,
+  ];
+}

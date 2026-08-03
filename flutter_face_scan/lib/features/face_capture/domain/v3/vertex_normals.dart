@@ -38,6 +38,8 @@ List<Vector3> computeVertexNormals(
 /// Sets each cap centroid's normal (index `baseIndex + i`) to the mean of its
 /// rim normals. Call with [normals] built from ORIGINAL triangles only, so cap
 /// faces don't crease the rim (no "eyeliner" seam).
+// REDUNDANT(eye-fill): only used by obsolete hole_filler centroid caps. Safe to
+// delete with hole_filler.dart.
 void assignCapNormals(
   List<Vector3> normals,
   List<List<int>> loops,

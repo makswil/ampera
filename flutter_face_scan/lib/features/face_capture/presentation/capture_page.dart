@@ -800,7 +800,7 @@ class _CapturePageState extends State<CapturePage> {
         ),
         const Divider(height: 1),
         SwitchListTile(
-          title: const Text('Fill eye/mouth holes'),
+          title: const Text('Fill eye holes'),
           subtitle: const Text('Off = leave ARKit holes in the model'),
           value: _debug.fillHoles,
           onChanged: (bool v) => _debug.fillHoles = v,
