@@ -9,6 +9,7 @@ import '../../domain/entities/pose_guidance.dart';
 import '../../domain/value_objects/pose_tolerance.dart';
 import '../pose_guidance_copy.dart';
 import '../scan_theme.dart';
+import 'camera_corner_frame.dart';
 import 'face_guide_layer.dart';
 import 'head_pose_hint.dart';
 import 'scan_onboarding_sheet.dart';
@@ -19,6 +20,9 @@ class CaptureOverlay extends StatelessWidget {
     required this.state,
     this.onStart,
     this.onRetake,
+    this.onGenerateModel,
+    this.canGenerateModel = false,
+    this.generatingModel = false,
     this.onOpenSettings,
     this.statusLine,
     this.captureBanner,
@@ -38,6 +42,16 @@ class CaptureOverlay extends StatelessWidget {
   final CaptureState state;
   final VoidCallback? onStart;
   final VoidCallback? onRetake;
+
+  /// Bake the last saved session into a textured 3D model.
+  final VoidCallback? onGenerateModel;
+
+  /// True when a bakeable session is loaded (enables Generate after scan).
+  final bool canGenerateModel;
+
+  /// True while bake / ml-wb is in flight (center status + hide actions).
+  final bool generatingModel;
+
   final VoidCallback? onOpenSettings;
   final String? statusLine;
   final String? captureBanner;
@@ -140,25 +154,32 @@ class CaptureOverlay extends StatelessWidget {
                       right: 24,
                       child: _CaptureBanner(text: captureBanner!),
                     ),
-                  Positioned(
-                    top: guidanceTop,
-                    left: 28,
-                    right: 28,
-                    child: _LiveGuidance(
-                      state: state,
-                      holding: holding,
-                      deferPoseGuidance: deferPoseGuidance,
-                      statusLine: inCaptureChrome ? null : statusLine,
-                      selectedExpression: selectedExpression,
-                      selectedActorMode: selectedActorMode,
-                      selectedPractitionerFlow: selectedPractitionerFlow,
-                      selectedMeshMotion: selectedMeshMotion,
-                      selectedClinicianCamera: selectedClinicianCamera,
-                      selectedRearCaptureKind: selectedRearCaptureKind,
-                      activeCapturePass: activeCapturePass,
+                  if (!generatingModel)
+                    Positioned(
+                      top: guidanceTop,
+                      left: 28,
+                      right: 28,
+                      child: _LiveGuidance(
+                        state: state,
+                        holding: holding,
+                        deferPoseGuidance: deferPoseGuidance,
+                        statusLine: inCaptureChrome ? null : statusLine,
+                        selectedExpression: selectedExpression,
+                        selectedActorMode: selectedActorMode,
+                        selectedPractitionerFlow: selectedPractitionerFlow,
+                        selectedMeshMotion: selectedMeshMotion,
+                        selectedClinicianCamera: selectedClinicianCamera,
+                        selectedRearCaptureKind: selectedRearCaptureKind,
+                        activeCapturePass: activeCapturePass,
+                      ),
                     ),
-                  ),
-                  if (!inCaptureChrome)
+                  if (generatingModel)
+                    const Positioned.fill(
+                      child: IgnorePointer(
+                        child: _GeneratingModelStatus(),
+                      ),
+                    ),
+                  if (!inCaptureChrome && !generatingModel)
                     Positioned(
                       left: 28,
                       right: 28,
@@ -167,6 +188,8 @@ class CaptureOverlay extends StatelessWidget {
                         state: state,
                         onStart: onStart,
                         onRetake: onRetake,
+                        onGenerateModel: onGenerateModel,
+                        canGenerateModel: canGenerateModel,
                         onOpenSettings: onOpenSettings,
                         selectedExpression: selectedExpression,
                         onExpressionChanged: onExpressionChanged,
@@ -178,6 +201,45 @@ class CaptureOverlay extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Centered status while the textured mesh is being created.
+class _GeneratingModelStatus extends StatelessWidget {
+  const _GeneratingModelStatus();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 36),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            SizedBox(
+              width: 36,
+              height: 36,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.5,
+                color: ScanTheme.accent,
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'Creating 3D model…',
+              textAlign: TextAlign.center,
+              style: ScanTheme.guidanceTitle,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'This can take a moment.',
+              textAlign: TextAlign.center,
+              style: ScanTheme.guidanceBody,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -293,7 +355,7 @@ class _LiveGuidance extends StatelessWidget {
         child: AnimatedSwitcher(
           duration: const Duration(milliseconds: 180),
           child: _useCameraCorners
-              ? _CameraCornerFrame(
+              ? CameraCornerFrame(
                   key: const ValueKey<String>('corners'),
                   child: body,
                 )
@@ -413,59 +475,13 @@ class _LiveGuidance extends StatelessWidget {
   }
 }
 
-/// Camera-viewfinder corners for idle / success copy.
-class _CameraCornerFrame extends StatelessWidget {
-  const _CameraCornerFrame({required this.child, super.key});
-
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return CustomPaint(
-      painter: _CameraCornersPainter(color: ScanTheme.accent),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 40),
-        child: child,
-      ),
-    );
-  }
-}
-
-class _CameraCornersPainter extends CustomPainter {
-  const _CameraCornersPainter({required this.color});
-
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    const double arm = 22;
-    final Paint paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.0
-      ..strokeCap = StrokeCap.square;
-
-    void corner(Offset o, double dx, double dy) {
-      canvas.drawLine(o, o + Offset(dx * arm, 0), paint);
-      canvas.drawLine(o, o + Offset(0, dy * arm), paint);
-    }
-
-    corner(Offset.zero, 1, 1);
-    corner(Offset(size.width, 0), -1, 1);
-    corner(Offset(0, size.height), 1, -1);
-    corner(Offset(size.width, size.height), -1, -1);
-  }
-
-  @override
-  bool shouldRepaint(_CameraCornersPainter oldDelegate) =>
-      oldDelegate.color != color;
-}
-
 class _BottomActions extends StatelessWidget {
   const _BottomActions({
     required this.state,
     this.onStart,
     this.onRetake,
+    this.onGenerateModel,
+    this.canGenerateModel = false,
     this.onOpenSettings,
     this.selectedExpression = ExpressionMode.neutral,
     this.onExpressionChanged,
@@ -474,6 +490,8 @@ class _BottomActions extends StatelessWidget {
   final CaptureState state;
   final VoidCallback? onStart;
   final VoidCallback? onRetake;
+  final VoidCallback? onGenerateModel;
+  final bool canGenerateModel;
   final VoidCallback? onOpenSettings;
   final ExpressionMode selectedExpression;
   final ValueChanged<ExpressionMode>? onExpressionChanged;
@@ -482,13 +500,15 @@ class _BottomActions extends StatelessWidget {
   Widget build(BuildContext context) {
     final bool showStart =
         state.status == CaptureStatus.idle && onStart != null;
-    final bool showRetake =
+    final bool showPostScan =
         state.status == CaptureStatus.completed && onRetake != null;
+    final bool showGenerate =
+        showPostScan && canGenerateModel && onGenerateModel != null;
     final bool isError = state.status == CaptureStatus.error;
     final ScanErrorKind? errorKind =
         isError ? classifyScanError(state.errorMessage) : null;
 
-    if (!showStart && !showRetake && !isError) {
+    if (!showStart && !showPostScan && !isError) {
       return const SizedBox.shrink();
     }
 
@@ -533,15 +553,119 @@ class _BottomActions extends StatelessWidget {
             expression: selectedExpression,
             onExpressionChanged: onExpressionChanged,
           ),
-        if (showRetake)
-          _StartRow(
-            label: 'Scan again · ${selectedExpression.label}',
-            semanticsLabel: 'Scan again ${selectedExpression.label}',
-            onStart: onRetake!,
-            expression: selectedExpression,
-            onExpressionChanged: onExpressionChanged,
-            icon: Icons.refresh,
+        if (showPostScan)
+          showGenerate
+              ? _PostScanActions(
+                  onRescan: onRetake!,
+                  onGenerateModel: onGenerateModel!,
+                  expression: selectedExpression,
+                  onExpressionChanged: onExpressionChanged,
+                )
+              : _StartRow(
+                  label: 'Rescan · ${selectedExpression.label}',
+                  semanticsLabel: 'Rescan ${selectedExpression.label}',
+                  onStart: onRetake!,
+                  expression: selectedExpression,
+                  onExpressionChanged: onExpressionChanged,
+                  icon: Icons.refresh,
+                ),
+      ],
+    );
+  }
+}
+
+/// Post-scan row: Rescan | Generate 3D (+ optional expression toggle).
+class _PostScanActions extends StatelessWidget {
+  const _PostScanActions({
+    required this.onRescan,
+    required this.onGenerateModel,
+    required this.expression,
+    this.onExpressionChanged,
+  });
+
+  final VoidCallback onRescan;
+  final VoidCallback onGenerateModel;
+  final ExpressionMode expression;
+  final ValueChanged<ExpressionMode>? onExpressionChanged;
+
+  static const double _toggleWidth = 52;
+  static const double _gap = 8;
+
+  static final ButtonStyle _outline = OutlinedButton.styleFrom(
+    foregroundColor: Colors.white,
+    side: BorderSide(color: Colors.white.withValues(alpha: 0.35)),
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+    textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: Semantics(
+            button: true,
+            label: 'Rescan ${expression.label}',
+            child: OutlinedButton.icon(
+              onPressed: onRescan,
+              style: _outline,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('Rescan'),
+            ),
           ),
+        ),
+        const SizedBox(width: _gap),
+        Expanded(
+          flex: 2,
+          child: Semantics(
+            button: true,
+            label: 'Generate 3D model',
+            child: FilledButton.icon(
+              style: ScanTheme.primaryButton.copyWith(
+                padding: const WidgetStatePropertyAll<EdgeInsets>(
+                  EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+                ),
+                textStyle: const WidgetStatePropertyAll<TextStyle>(
+                  TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+              ),
+              onPressed: onGenerateModel,
+              icon: const Icon(Icons.view_in_ar_outlined, size: 18),
+              label: const Text('Generate 3D'),
+            ),
+          ),
+        ),
+        if (onExpressionChanged != null) ...<Widget>[
+          const SizedBox(width: _gap),
+          Semantics(
+            button: true,
+            label: 'Expression ${expression.label}, tap to switch',
+            child: SizedBox(
+              width: _toggleWidth,
+              height: 48,
+              child: OutlinedButton(
+                onPressed: () => onExpressionChanged!(expression.next),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  padding: EdgeInsets.zero,
+                  side: BorderSide(
+                    color: Colors.white.withValues(alpha: 0.35),
+                  ),
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.zero,
+                  ),
+                ),
+                child: Icon(
+                  expression == ExpressionMode.smile
+                      ? Icons.sentiment_satisfied_alt
+                      : Icons.sentiment_neutral,
+                  size: 22,
+                ),
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }

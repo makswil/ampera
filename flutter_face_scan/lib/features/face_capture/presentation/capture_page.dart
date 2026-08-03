@@ -1332,6 +1332,9 @@ class _CapturePageState extends State<CapturePage> {
                     state: state,
                     onStart: () => unawaited(_handleStart()),
                     onRetake: () => unawaited(_handleStart()),
+                    onGenerateModel: () => unawaited(_bakeTexture()),
+                    canGenerateModel: _lastSession != null && !_baking,
+                    generatingModel: _baking,
                     onOpenSettings: () =>
                         unawaited(_trackingService.openAppSettings()),
                     targetDistanceMeters: _debug.targetDistanceMeters,
@@ -1374,112 +1377,109 @@ class _CapturePageState extends State<CapturePage> {
                           )
                         : const SizedBox.shrink(),
               ),
+              // Match CaptureOverlay bottom/side chrome inset (28).
               Positioned(
                 top: 0,
-                right: 0,
+                left: 28,
+                child: SafeArea(
+                  child: BlocBuilder<CaptureBloc, CaptureState>(
+                    builder: (BuildContext context, CaptureState state) {
+                      if (state.status != CaptureStatus.capturing) {
+                        return const SizedBox.shrink();
+                      }
+                      return Semantics(
+                        button: true,
+                        label: 'Cancel scan',
+                        child: IconButton(
+                          tooltip: 'Cancel',
+                          style: _chromeIconButtonStyleLeading,
+                          icon: const Icon(
+                            Icons.close,
+                            color: Colors.white70,
+                            size: _chromeIconSize,
+                          ),
+                          onPressed: _cancelScan,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 0,
+                right: 28,
                 child: SafeArea(
                   child: ListenableBuilder(
                     listenable: _debug,
-                    builder: (BuildContext context, Widget? _) =>
-                        BlocBuilder<CaptureBloc, CaptureState>(
-                      builder: (BuildContext context, CaptureState state) =>
-                          Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: <Widget>[
-                          if (state.status == CaptureStatus.capturing)
-                            Semantics(
-                              button: true,
-                              label: 'Cancel scan',
-                              child: IconButton(
-                                tooltip: 'Cancel',
-                                icon: const Icon(
-                                  Icons.close,
-                                  color: Colors.white70,
-                                  size: 24,
-                                ),
-                                onPressed: _cancelScan,
-                              ),
-                            ),
-                          if (_baked != null)
-                            IconButton(
-                              tooltip: 'Share model',
-                              icon: const Icon(
-                                Icons.ios_share,
-                                color: Colors.white70,
-                                size: 24,
-                              ),
-                              onPressed: () => unawaited(_shareModel()),
-                            ),
+                    builder: (BuildContext context, Widget? _) => Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: <Widget>[
+                        if (_debug.isDev)
                           IconButton(
-                            tooltip: _baking
-                                ? 'Baking…'
-                                : (_lastSession == null
-                                    ? 'Bake (no session)'
-                                    : 'Bake'),
+                            tooltip: 'Bake settings',
+                            style: _chromeIconButtonStyle,
+                            icon: const Icon(
+                              Icons.tune,
+                              color: Colors.white70,
+                              size: _chromeIconSize,
+                            ),
+                            onPressed: _openBakeSettings,
+                          ),
+                        Semantics(
+                          button: true,
+                          label: 'How to scan',
+                          child: IconButton(
+                            tooltip: 'How to scan',
+                            style: _chromeIconButtonStyle,
                             icon: Icon(
-                              Icons.brush,
-                              color: _baking
-                                  ? ScanTheme.accent
-                                  : (_lastSession == null
-                                      ? Colors.white38
-                                      : Colors.white70),
-                              size: 24,
+                              Icons.help_outline,
+                              color: ScanTheme.accent,
+                              size: _chromeIconSize,
                             ),
-                            onPressed: _baking || _lastSession == null
-                                ? null
-                                : () => unawaited(_bakeTexture()),
+                            onPressed: _showHowToScan,
                           ),
-                          if (_debug.isDev)
-                            IconButton(
-                              tooltip: 'Bake settings',
-                              icon: const Icon(
-                                Icons.tune,
-                                color: Colors.white70,
-                                size: 24,
-                              ),
-                              onPressed: _openBakeSettings,
+                        ),
+                        Semantics(
+                          button: true,
+                          label: 'Manage saved scans',
+                          child: IconButton(
+                            tooltip: 'Saved scans',
+                            style: _chromeIconButtonStyle,
+                            icon: const Icon(
+                              Icons.folder_outlined,
+                              color: Colors.white70,
+                              size: _chromeIconSize,
                             ),
-                          Semantics(
-                            button: true,
-                            label: 'Manage saved scans',
-                            child: IconButton(
-                              tooltip: 'Saved scans',
-                              icon: const Icon(
-                                Icons.folder_outlined,
-                                color: Colors.white70,
-                                size: 24,
-                              ),
-                              onPressed: _openScansManager,
-                            ),
+                            onPressed: _openScansManager,
                           ),
-                          Semantics(
-                            button: true,
-                            label: 'How to scan',
-                            child: IconButton(
-                              tooltip: 'How to scan',
-                              icon: const Icon(
-                                Icons.help_outline,
-                                color: Colors.white70,
-                                size: 24,
-                              ),
-                              onPressed: _showHowToScan,
+                        ),
+                        Semantics(
+                          button: true,
+                          label: 'Settings',
+                          child: IconButton(
+                            tooltip: 'Settings',
+                            style: _chromeIconButtonStyle,
+                            icon: const Icon(
+                              Icons.settings,
+                              color: Colors.white70,
+                              size: _chromeIconSize,
                             ),
+                            onPressed: _openSettings,
                           ),
-                          Semantics(
-                            button: true,
-                            label: 'Settings',
-                            child: IconButton(
-                              tooltip: 'Settings',
-                              icon: const Icon(
-                                Icons.settings,
-                                color: Colors.white70,
-                                size: 24,
-                              ),
-                              onPressed: _openSettings,
+                        ),
+                        if (_debug.isDev && _baked != null && !_baking)
+                          IconButton(
+                            tooltip: 'Share model',
+                            style: _chromeIconButtonStyle,
+                            icon: const Icon(
+                              Icons.ios_share,
+                              color: Colors.white70,
+                              size: _chromeIconSize,
                             ),
+                            onPressed: () => unawaited(_shareModel()),
                           ),
-                        ],
-                      ),
+                      ],
                     ),
                   ),
                 ),
@@ -1490,6 +1490,24 @@ class _CapturePageState extends State<CapturePage> {
       ),
     );
   }
+
+  /// One step above the previous 24px chrome icons.
+  static const double _chromeIconSize = 28;
+
+  /// Flush icon glyphs to the 28px chrome inset (same as bottom actions).
+  static final ButtonStyle _chromeIconButtonStyle = IconButton.styleFrom(
+    padding: EdgeInsets.zero,
+    minimumSize: const Size(48, 48),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    alignment: Alignment.centerRight,
+  );
+
+  static final ButtonStyle _chromeIconButtonStyleLeading = IconButton.styleFrom(
+    padding: EdgeInsets.zero,
+    minimumSize: const Size(48, 48),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    alignment: Alignment.centerLeft,
+  );
 
   String? _consumerStatusLine() {
     if (_saving) {

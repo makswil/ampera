@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'scan_theme.dart';
+import 'widgets/camera_corner_frame.dart';
 
 /// Flutter shell around the native SceneKit OBJ platform view.
 ///
@@ -61,11 +62,10 @@ class _ObjModelViewerPageState extends State<ObjModelViewerPage> {
     final Color appBarFill = canvas.withValues(alpha: dark ? 0.72 : 0.88);
     final Color vignetteEdge = canvas.withValues(alpha: dark ? 0.60 : 0.40);
     final Color vignetteSoft = canvas.withValues(alpha: dark ? 0.40 : 0.25);
-    final Color hintFill = dark
-        ? Colors.black.withValues(alpha: 0.55)
-        : Colors.white.withValues(alpha: 0.88);
-    final Color hintBorder = onCanvas.withValues(alpha: dark ? 0.12 : 0.10);
     final Color hintText = onCanvas.withValues(alpha: dark ? 0.90 : 0.78);
+    final String fromLine = widget.title.trim().isEmpty
+        ? ''
+        : 'from ${widget.title.trim()}';
 
     return Scaffold(
       backgroundColor: canvas,
@@ -88,7 +88,7 @@ class _ObjModelViewerPageState extends State<ObjModelViewerPage> {
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
             Text(
-              widget.title,
+              'Your 3D face model',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: onCanvas,
@@ -97,9 +97,13 @@ class _ObjModelViewerPageState extends State<ObjModelViewerPage> {
                 letterSpacing: -0.2,
               ),
             ),
-            if (subtitle != null && subtitle.isNotEmpty)
+            if (fromLine.isNotEmpty ||
+                (subtitle != null && subtitle.isNotEmpty))
               Text(
-                subtitle,
+                <String>[
+                  if (fromLine.isNotEmpty) fromLine,
+                  if (subtitle != null && subtitle.isNotEmpty) subtitle,
+                ].join(' · '),
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: onCanvas.withValues(alpha: 0.55),
@@ -164,41 +168,23 @@ class _ObjModelViewerPageState extends State<ObjModelViewerPage> {
             right: 20,
             bottom: MediaQuery.paddingOf(context).bottom + 20,
             child: IgnorePointer(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: hintFill,
-                      border: Border.all(color: hintBorder),
-                    ),
-                    child: Text(
-                      'Drag to rotate  ·  Pinch to zoom',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: hintText,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        letterSpacing: 0.2,
-                      ),
-                    ),
+              child: Center(
+                child: CameraCornerFrame(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 28,
                   ),
-                  const SizedBox(height: 8),
-                  Text(
-                    '3D face model',
+                  child: Text(
+                    'Drag to rotate  ·  Pinch to zoom',
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: scheme.primary.withValues(alpha: 0.9),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.6,
+                      color: hintText,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.2,
                     ),
                   ),
-                ],
+                ),
               ),
             ),
           ),
