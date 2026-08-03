@@ -28,4 +28,24 @@ void main() {
       expect(unique.length, FaceSymmetryAxis.ordered.length);
     });
   });
+
+  group('FaceHoleGeometry', () {
+    test('each eye has 22 triangles', () {
+      expect(FaceHoleGeometry.leftEyeTriangles.length, 22 * 3);
+      expect(FaceHoleGeometry.rightEyeTriangles.length, 22 * 3);
+      expect(FaceHoleGeometry.eyeTriangles.length, 44 * 3);
+    });
+
+    test('left eye indices stay in 1085–1108', () {
+      for (final int i in FaceHoleGeometry.leftEyeTriangles) {
+        expect(i, inInclusiveRange(1085, 1108));
+      }
+    });
+
+    test('right eye indices stay in 1061–1084', () {
+      for (final int i in FaceHoleGeometry.rightEyeTriangles) {
+        expect(i, inInclusiveRange(1061, 1084));
+      }
+    });
+  });
 }

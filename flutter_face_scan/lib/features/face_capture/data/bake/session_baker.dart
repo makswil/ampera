@@ -12,7 +12,6 @@ import '../../domain/entities/capture_session.dart';
 import '../../domain/entities/capture_snapshot.dart';
 import '../../domain/entities/face_pose.dart';
 import '../../domain/entities/still_capture.dart';
-import '../../domain/v3/hole_filler.dart';
 import '../../domain/v3/normal_map_baker.dart';
 import '../../domain/v3/texture_projection.dart';
 import '../../domain/v3/vertex_normals.dart';
@@ -300,52 +299,30 @@ final class _BakeResult {
 /// Top-level so it runs in a `compute` isolate. Decodes the JPEGs, bakes the
 /// texture, builds smooth normals and renders OBJ/MTL — off the UI thread.
 _BakeResult _runBake(_BakeRequest r) {
-  BakePose frontal = _toBakePose(r.frontal);
+  final BakePose frontal = _toBakePose(r.frontal);
   // Right-turn pose feeds the left face regions by default; flip swaps.
-  BakePose leftSource = _toBakePose(r.flipSides ? r.left40 : r.right40);
-  BakePose rightSource = _toBakePose(r.flipSides ? r.right40 : r.left40);
-  BakePose? upSource = r.up == null ? null : _toBakePose(r.up!);
+  final BakePose leftSource =
+      _toBakePose(r.flipSides ? r.left40 : r.right40);
+  final BakePose rightSource =
+      _toBakePose(r.flipSides ? r.right40 : r.left40);
+  final BakePose? upSource = r.up == null ? null : _toBakePose(r.up!);
 
-  // Per-vertex chin-up blend weight, from the ORIGINAL (pre-cap) frontal
-  // geometry so cap vertices stay 0 (frontal). Only the static path uses it;
-  // empty in view-dependent mode or when there's no up pose.
+  // Per-vertex chin-up blend weight from the frontal geometry. Only the static
+  // path uses it; empty in view-dependent mode or when there's no up pose.
   final List<double> downWeight = (r.viewDependent || upSource == null)
       ? const <double>[]
       : _computeDownWeights(frontal.vertices);
 
-  List<double> uvs = r.uvs;
-  List<int> triangles = r.triangles;
-  List<List<int>> capLoops = const <List<int>>[];
-  int capBase = 0;
+  final List<double> uvs = r.uvs;
+  // Eyes only: author-provided strip triangles on existing verts. Mouth stays
+  // open (no fill).
+  final List<int> triangles = r.fillHoles
+      ? <int>[...r.triangles, ...FaceHoleGeometry.eyeTriangles]
+      : r.triangles;
 
-  // Cap the open eye/mouth holes so they get geometry + texture. Exclude the
-  // outer face silhouette (else a giant fan covers the whole mask).
-  if (r.fillHoles) {
-    final List<List<int>> loops =
-        innerHoleLoops(findBoundaryLoops(r.triangles), r.uvs);
-    if (loops.isNotEmpty) {
-      capBase = r.uvs.length ~/ 2;
-      final CapGeometry cap = buildCapGeometry(loops, r.uvs, capBase);
-      uvs = <double>[...r.uvs, ...cap.uvs];
-      triangles = <int>[...r.triangles, ...cap.triangles];
-      frontal = bakePoseWithCaps(frontal, loops);
-      leftSource = bakePoseWithCaps(leftSource, loops);
-      rightSource = bakePoseWithCaps(rightSource, loops);
-      if (upSource != null) {
-        upSource = bakePoseWithCaps(upSource, loops);
-      }
-      capLoops = loops;
-    }
-  }
-
-  // Normals from the ORIGINAL triangles so cap faces don't crease the rim; then
-  // give each cap centroid the mean of its rim normals (smooth seam). Computed
-  // before the bake so the view-dependent path can weight by them too.
+  // Normals from the ORIGINAL triangles so eye cap faces don't crease the rim.
   final List<Vector3> normals =
       computeVertexNormals(frontal.vertices, r.triangles);
-  if (capLoops.isNotEmpty) {
-    assignCapNormals(normals, capLoops, capBase);
-  }
 
   final img.Image texture = r.viewDependent
       ? _bakeViewDependent(
@@ -466,7 +443,7 @@ List<double> _computeDownWeights(List<Vector3> verts) {
 /// head-on it saw the surface (`n·v`), gated by a per-pose spatial guard so a
 /// pose never bleeds across the symmetry axis. Replaces the static
 /// `sideWeight`/`downWeight` tables. `[normals]` are the canonical face-local
-/// normals (incl. cap centroids), index-aligned with each pose's vertices.
+/// normals, index-aligned with each pose's vertices.
 ///
 /// Guard mapping (see `view_weights.dart`):
 ///  * frontal   → central band only (turn poses own the outer face),

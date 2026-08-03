@@ -4,7 +4,6 @@ import 'package:image/image.dart' as img;
 import 'package:vector_math/vector_math_64.dart';
 
 import '../../domain/constants/face_regions.g.dart';
-import '../../domain/v3/hole_filler.dart';
 import '../../domain/v3/texture_projection.dart';
 
 /// One pose ready for baking: RGB still, its face-local vertices (index-aligned
@@ -30,27 +29,6 @@ final class BakePose {
   /// Face-local→world, rigid (rotation+translation, no scale) → the rotation
   /// part maps face-local normals to world.
   final Matrix4 faceTransform;
-}
-
-/// [pose] with hole rims flattened onto each loop's plane, then flat cap
-/// centroids appended (same image/matrices). Copies verts so the source pose
-/// stays unchanged.
-BakePose bakePoseWithCaps(BakePose pose, List<List<int>> loops) {
-  final List<Vector3> verts = <Vector3>[
-    for (final Vector3 v in pose.vertices) Vector3.copy(v),
-  ];
-  // Eye/mouth rings share one depth → flat openings (ARKit sockets recess them).
-  flattenHoleRims(loops, verts);
-  return BakePose(
-    image: pose.image,
-    vertices: <Vector3>[
-      ...verts,
-      ...capVertices(loops, verts), // depthFactor 0 = flat with the rim plane
-    ],
-    projection: pose.projection,
-    viewMatrix: pose.viewMatrix,
-    faceTransform: pose.faceTransform,
-  );
 }
 
 /// A [BakePose] paired with its per-vertex view-dependent weight (guarded

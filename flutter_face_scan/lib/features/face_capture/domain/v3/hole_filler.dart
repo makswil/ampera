@@ -1,10 +1,14 @@
 import 'package:vector_math/vector_math_64.dart';
 
+// REDUNDANT(eye-fill): entire file obsolete — bake now appends
+// FaceHoleGeometry.eyeTriangles only. Safe to delete with hole_filler_test.dart.
+
 /// Caps ARKit's open eye/mouth mesh holes (gaps in the topology) so they can be
 /// textured. Pure; shared by app + bake tool.
 
 /// Ordered vertex loops of open boundaries: a directed edge `u→v` is a rim when
 /// its reverse `v→u` is absent.
+// REDUNDANT(eye-fill)
 List<List<int>> findBoundaryLoops(List<int> triangles) {
   const int stride = 1 << 20; // > any vertex index; encodes (u,v) as u*stride+v
   final Set<int> directed = <int>{};
@@ -47,6 +51,7 @@ List<List<int>> findBoundaryLoops(List<int> triangles) {
 
 /// Interior holes (eyes, mouth) only: drops the largest-UV-area loop, which is
 /// the outer face silhouette (capping it would fan over the whole mask).
+// REDUNDANT(eye-fill)
 List<List<int>> innerHoleLoops(List<List<int>> loops, List<double> uvs) {
   if (loops.length <= 1) {
     return const <List<int>>[]; // only the outer boundary → nothing to cap
@@ -81,6 +86,7 @@ List<List<int>> innerHoleLoops(List<List<int>> loops, List<double> uvs) {
 }
 
 /// Position-independent cap geometry. Loop `i`'s centroid vertex = `baseIndex + i`.
+// REDUNDANT(eye-fill)
 final class CapGeometry {
   const CapGeometry({required this.triangles, required this.uvs});
 
@@ -92,6 +98,7 @@ final class CapGeometry {
 }
 
 /// Fan triangles + centroid UVs (mean of each loop's UVs) for [loops].
+// REDUNDANT(eye-fill)
 CapGeometry buildCapGeometry(
   List<List<int>> loops,
   List<double> uvs,
@@ -126,6 +133,7 @@ CapGeometry buildCapGeometry(
 ///
 /// ARKit's eye sockets recess the eyelid ring into the skull; flattening the
 /// ring (and then capping flat) removes the "eyes pushed into the face" look.
+// REDUNDANT(eye-fill)
 void flattenHoleRims(List<List<int>> loops, List<Vector3> vertices) {
   for (final List<int> loop in loops) {
     final ({Vector3 centroid, Vector3 normal})? plane =
@@ -146,6 +154,7 @@ void flattenHoleRims(List<List<int>> loops, List<Vector3> vertices) {
 /// Per-pose cap vertex positions: each loop centroid on the (optionally
 /// flattened) rim plane. [depthFactor] × loop radius insets into the socket
 /// (0 = flat, the default — recessed caps look like sunken eyes).
+// REDUNDANT(eye-fill)
 List<Vector3> capVertices(
   List<List<int>> loops,
   List<Vector3> vertices, {
@@ -156,6 +165,7 @@ List<Vector3> capVertices(
   ];
 }
 
+// REDUNDANT(eye-fill)
 Vector3 _capVertex(List<int> loop, List<Vector3> vertices, double depthFactor) {
   final ({Vector3 centroid, Vector3 normal})? plane =
       _loopPlane(loop, vertices);
@@ -183,6 +193,7 @@ Vector3 _capVertex(List<int> loop, List<Vector3> vertices, double depthFactor) {
 }
 
 /// Newell plane for [loop]: centroid + unit normal. Null if degenerate.
+// REDUNDANT(eye-fill)
 ({Vector3 centroid, Vector3 normal})? _loopPlane(
   List<int> loop,
   List<Vector3> vertices,

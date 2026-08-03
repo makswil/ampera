@@ -1,3 +1,6 @@
+// REDUNDANT(eye-fill): entire file obsolete — covers hole_filler.dart which is
+// no longer used by the bake path (FaceHoleGeometry.eyeTriangles). Safe to delete.
+
 import 'package:flutter_face_scan/features/face_capture/domain/v3/hole_filler.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vector_math/vector_math_64.dart';

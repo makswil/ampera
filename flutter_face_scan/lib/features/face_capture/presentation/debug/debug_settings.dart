@@ -85,8 +85,8 @@ class DebugSettings extends ChangeNotifier {
   /// Native face-mesh + symmetry-axis overlay. Default off.
   bool get showMesh => _showMesh;
 
-  /// Whether the open eye/mouth holes are capped + textured (on) or left as
-  /// holes (off) in the baked model. Default on.
+  /// Whether eye strip-tris are added (on) or eye holes stay open (off) in the
+  /// baked model. Mouth is never filled. Default on.
   bool get fillHoles => _fillHoles;
 
   /// Texture source: false = ARKit video frame (stable), true = AVCapture hi-res
