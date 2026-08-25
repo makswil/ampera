@@ -7,6 +7,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../data/session_path.dart';
 import 'scan_theme.dart';
 import 'widgets/camera_corner_frame.dart';
 
@@ -412,8 +413,15 @@ Future<List<String>?> loadExpressionBakeFramePaths(String bakeDirPath) async {
     if (obj == null || obj.isEmpty) {
       continue;
     }
+    final File? objFile = SessionPath.fileUnderRoot(
+      Directory(bakeDirPath),
+      obj,
+    );
+    if (objFile == null) {
+      continue;
+    }
     final int index = (item['index'] as num?)?.toInt() ?? indexed.length;
-    indexed.add((index, '$bakeDirPath/$obj'));
+    indexed.add((index, objFile.path));
   }
   indexed.sort(((int, String) a, (int, String) b) => a.$1.compareTo(b.$1));
   final List<String> paths = <String>[for (final (int, String) e in indexed) e.$2];

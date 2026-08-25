@@ -1740,7 +1740,7 @@ class _CapturePageState extends State<CapturePage> {
                 final FacePose pose = state.completedPoses.last;
                 // Sync flag before this frame builds — otherwise completed copy
                 // flashes over the freeze on the last pose. Latch the ring full
-                // so the last schnipsel fills before the still.
+                // so the last ring segment fills before the still.
                 setState(() {
                   _awaitingStill = true;
                   _holdComplete = true;

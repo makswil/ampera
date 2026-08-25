@@ -11,6 +11,7 @@ import '../../domain/constants/face_vertex_indices.dart';
 import '../../domain/v3/texture_projection.dart';
 import '../../domain/v3/vertex_normals.dart';
 import '../../domain/v3/view_weights.dart';
+import '../session_path.dart';
 import 'aperture_pin.dart';
 import 'obj_writer.dart';
 import 'texture_baker.dart';
@@ -217,7 +218,6 @@ final class ExpressionSequenceBaker {
     final Map<String, Object?> bakeManifest = <String, Object?>{
       'frameCount': baked.length,
       'repairedNoseOutliers': noseRepaired,
-      'repairedMeshOutliers': noseRepaired,
       'noseScores': <double>[
         for (final _LoadedExprFrame f in loaded) expressionNoseScore(f.vertices),
       ],
@@ -257,9 +257,9 @@ final class ExpressionSequenceBaker {
     final int index = (raw['index'] as num?)?.toInt() ?? fallbackIndex;
     final String jpgName = raw['jpg'] as String? ?? '';
     final String vertsName = raw['verts'] as String? ?? '';
-    final File jpgFile = File('${exprDir.path}/$jpgName');
-    final File vertsFile = File('${exprDir.path}/$vertsName');
-    if (!vertsFile.existsSync()) {
+    final File? jpgFile = SessionPath.fileUnderRoot(exprDir, jpgName);
+    final File? vertsFile = SessionPath.fileUnderRoot(exprDir, vertsName);
+    if (vertsFile == null || !vertsFile.existsSync()) {
       return null;
     }
 
@@ -267,7 +267,7 @@ final class ExpressionSequenceBaker {
     final Uint8List jpegBytes;
     if (override != null) {
       jpegBytes = override;
-    } else if (jpgFile.existsSync()) {
+    } else if (jpgFile != null && jpgFile.existsSync()) {
       jpegBytes = await jpgFile.readAsBytes();
     } else {
       return null;

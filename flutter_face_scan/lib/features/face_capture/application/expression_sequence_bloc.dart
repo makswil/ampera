@@ -804,6 +804,9 @@ final class ExpressionSequenceBloc
         ),
       );
       await Future<void>.delayed(const Duration(milliseconds: 700));
+      if (isClosed) {
+        return;
+      }
       emit(
         state.copyWith(
           phase: ExpressionSequencePhase.completed,
@@ -907,11 +910,14 @@ final class ExpressionSequenceBloc
     );
   }
 
-  void _onFailed(
+  Future<void> _onFailed(
     ExpressionSequenceFailed event,
     Emitter<ExpressionSequenceState> emit,
-  ) {
-    unawaited(_teardownCapture(cancelNative: true));
+  ) async {
+    await _teardownCapture(cancelNative: true);
+    if (isClosed) {
+      return;
+    }
     emit(
       state.copyWith(
         phase: ExpressionSequencePhase.error,

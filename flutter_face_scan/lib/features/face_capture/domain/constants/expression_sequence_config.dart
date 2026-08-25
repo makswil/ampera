@@ -48,7 +48,7 @@ abstract final class ExpressionSequenceConfig {
   /// Frontal hold before AE/AWB settle+lock (then support stills + clip).
   static const Duration aeSettleHold = Duration(milliseconds: 800);
 
-  /// Capture order for texture support stills (before smile settle).
+  /// Capture order for texture support stills (before expression settle).
   static const List<FacePose> supportPoses = <FacePose>[
     FacePose.left40,
     FacePose.right40,

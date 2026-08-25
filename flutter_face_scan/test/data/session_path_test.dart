@@ -45,6 +45,36 @@ void main() {
     });
   });
 
+  group('SessionPath.fileUnderRoot', () {
+    late Directory tempDir;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('session_path_nested');
+    });
+    tearDown(() async {
+      if (tempDir.existsSync()) {
+        await tempDir.delete(recursive: true);
+      }
+    });
+
+    test('allows nested relative paths under root', () {
+      final File? file =
+          SessionPath.fileUnderRoot(tempDir, 'frames/0001.jpg');
+      expect(file, isNotNull);
+      expect(file!.path.contains('frames'), isTrue);
+      expect(file.path.endsWith('0001.jpg'), isTrue);
+    });
+
+    test('rejects traversal in nested relative paths', () {
+      expect(
+        SessionPath.fileUnderRoot(tempDir, 'frames/../secret.jpg'),
+        isNull,
+      );
+      expect(SessionPath.fileUnderRoot(tempDir, '../x.jpg'), isNull);
+      expect(SessionPath.fileUnderRoot(tempDir, '/abs.jpg'), isNull);
+    });
+  });
+
   group('SessionPath.sessionDirectory', () {
     late Directory tempDir;
 

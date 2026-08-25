@@ -3,7 +3,7 @@ enum ExpressionSequencePhase {
   /// Waiting for Start.
   idle,
 
-  /// Frontal hold while AE/AWB settles, then lock for the whole smile run.
+  /// Frontal hold while AE/AWB settles, then lock for the whole expression run.
   aeSettle,
 
   /// Neutral left turn (~40°) still for side texture support.
@@ -12,7 +12,7 @@ enum ExpressionSequencePhase {
   /// Neutral right turn (~40°) still for side texture support.
   supportRight,
 
-  /// Neutral chin-up still for under-nose / chin gap fill (smile bake only).
+  /// Neutral chin-up still for under-nose / chin gap fill (expression bake).
   supportUp,
 
   /// Face must be frontal; nothing is persisted yet for the clip.
@@ -24,10 +24,10 @@ enum ExpressionSequencePhase {
   /// Ring buffer running; waiting for mimic onset.
   buffering,
 
-  /// Effective start locked; writing until smile+buffer or hard cap.
+  /// Effective start locked; writing until expression+buffer or hard cap.
   recording,
 
-  /// Clip done — frontal hi-res still for the end pose (hold smile).
+  /// Clip done — frontal hi-res still for the end pose.
   hiResEnd,
 
   /// Sequence committed to disk.

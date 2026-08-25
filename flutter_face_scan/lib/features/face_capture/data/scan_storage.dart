@@ -234,7 +234,7 @@ final class ScanStorage {
     return files;
   }
 
-  /// Absolute path to `expression/sequence.json` when this is a smile session.
+  /// Absolute path to `expression/sequence.json` when this is an expression session.
   String? expressionSequenceManifest(String id) {
     final Directory? dir = SessionPath.sessionDirectory(_scansDir, id);
     if (dir == null) {
@@ -306,7 +306,7 @@ final class ScanStorage {
     return objs.first;
   }
 
-  /// Absolute path to `expression/baked` when this session has a smile bake.
+  /// Absolute path to `expression/baked` when this session has an expression bake.
   String? expressionBakeDirectory(String id) {
     final Directory? dir = SessionPath.sessionDirectory(_scansDir, id);
     if (dir == null) {

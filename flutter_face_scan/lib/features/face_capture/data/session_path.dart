@@ -44,16 +44,50 @@ abstract final class SessionPath {
     return true;
   }
 
+  /// Relative path that may include subdirs (e.g. `frames/0001.jpg`).
+  ///
+  /// Each path segment must pass [isSafeRelativeFileName] — no `..`, no
+  /// absolute roots, no empty segments.
+  static bool isSafeRelativePath(String relative) {
+    if (relative.isEmpty ||
+        relative.startsWith('/') ||
+        RegExp(r'^[A-Za-z]:').hasMatch(relative)) {
+      return false;
+    }
+    final List<String> parts = relative.split(RegExp(r'[/\\]'));
+    if (parts.isEmpty) {
+      return false;
+    }
+    for (final String part in parts) {
+      if (!isSafeRelativeFileName(part)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   /// Resolves [name] under [sessionDir]. Null if [name] is unsafe or the
   /// resolved path would escape [sessionDir] (symlink / `..` edge cases).
   static File? fileUnderSession(Directory sessionDir, String name) {
     if (!isSafeRelativeFileName(name)) {
       return null;
     }
-    final String sessionRoot = _canonicalize(sessionDir.path);
-    final File candidate = File('$sessionRoot${Platform.pathSeparator}$name');
-    final String resolved = _canonicalize(candidate.path);
-    if (!_isWithinRoot(resolved, sessionRoot)) {
+    return fileUnderRoot(sessionDir, name);
+  }
+
+  /// Resolves a (possibly nested) [relative] path under [root].
+  ///
+  /// Null when [relative] is unsafe or would escape [root].
+  static File? fileUnderRoot(Directory root, String relative) {
+    if (!isSafeRelativePath(relative)) {
+      return null;
+    }
+    final String rootCanon = _canonicalize(root.path);
+    final String joined =
+        '$rootCanon${Platform.pathSeparator}'
+        '${relative.split(RegExp(r'[/\\]')).join(Platform.pathSeparator)}';
+    final String resolved = _canonicalize(joined);
+    if (!_isWithinRoot(resolved, rootCanon)) {
       return null;
     }
     return File(resolved);

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../data/bake/expression_sequence_baker.dart';
 import '../data/bake/session_baker.dart';
+import '../data/session_path.dart';
 import '../domain/constants/capture_defaults.dart';
 import '../domain/entities/capture_session.dart';
 import '../presentation/face_scan_log.dart';
@@ -66,6 +67,8 @@ final class ModelGenerateService extends ChangeNotifier {
     required ModelGenerateWbCorrector? correctWhiteBalance,
   }) async {
     if (_running) {
+      _error = 'Generate already running';
+      notifyListeners();
       return;
     }
     _running = true;
@@ -139,6 +142,8 @@ final class ModelGenerateService extends ChangeNotifier {
     required ModelGenerateWbCorrector? correctWhiteBalance,
   }) async {
     if (_running) {
+      _error = 'Generate already running';
+      notifyListeners();
       return;
     }
     _running = true;
@@ -244,8 +249,8 @@ Future<({Map<String, Uint8List>? overrides, String note})>
     if (jpgName.isEmpty) {
       continue;
     }
-    final File jpgFile = File('${exprDir.path}/$jpgName');
-    if (!jpgFile.existsSync()) {
+    final File? jpgFile = SessionPath.fileUnderRoot(exprDir, jpgName);
+    if (jpgFile == null || !jpgFile.existsSync()) {
       continue;
     }
     names.add(jpgName);

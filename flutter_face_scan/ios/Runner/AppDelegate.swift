@@ -880,6 +880,14 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   // MARK: Expression sequence capture
 
   func startExpressionBuffer(directoryPath: String, result: @escaping FlutterResult) {
+    guard faceScanIsShareablePath(directoryPath) else {
+      result(FlutterError(
+        code: "expression_dir",
+        message: "Expression buffer path must be under Documents/face_scans",
+        details: nil
+      ))
+      return
+    }
     let root = URL(fileURLWithPath: directoryPath, isDirectory: true)
     let dir = root.appendingPathComponent("expression", isDirectory: true)
     let frames = dir.appendingPathComponent("frames", isDirectory: true)
