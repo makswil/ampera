@@ -194,8 +194,73 @@ final class ScanStorage {
     return files;
   }
 
-  /// Newest bake `.obj` in the session, or null if none / missing session.
+  /// All files under the session (recursive). [name] is relative to the session
+  /// root (e.g. `expression/frames/frame_0000.jpg`). Newest first.
+  Future<List<ScanFileEntry>> listFilesRecursive(String id) async {
+    final Directory? dir = SessionPath.sessionDirectory(_scansDir, id);
+    if (dir == null || !dir.existsSync()) {
+      return const <ScanFileEntry>[];
+    }
+    final String root = dir.path;
+    final List<ScanFileEntry> files = <ScanFileEntry>[];
+    await for (final FileSystemEntity entity in dir.list(
+      recursive: true,
+      followLinks: false,
+    )) {
+      if (entity is! File) {
+        continue;
+      }
+      final FileStat stat = await entity.stat();
+      String rel = entity.path;
+      if (rel.startsWith(root)) {
+        rel = rel.substring(root.length);
+        if (rel.startsWith('/')) {
+          rel = rel.substring(1);
+        }
+      }
+      files.add(
+        ScanFileEntry(
+          name: rel,
+          path: entity.path,
+          sizeBytes: stat.size,
+          modified: stat.modified,
+        ),
+      );
+    }
+    files.sort(
+      (ScanFileEntry a, ScanFileEntry b) =>
+          a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+    );
+    return files;
+  }
+
+  /// Absolute path to `expression/sequence.json` when this is a smile session.
+  String? expressionSequenceManifest(String id) {
+    final Directory? dir = SessionPath.sessionDirectory(_scansDir, id);
+    if (dir == null) {
+      return null;
+    }
+    final File seq = File('${dir.path}/expression/sequence.json');
+    return seq.existsSync() ? seq.path : null;
+  }
+
+  /// Newest bake `.obj` in the session (top-level or `expression/baked/`),
+  /// or null if none / missing session.
   Future<ScanFileEntry?> newestObj(String id) async {
+    final Directory? dir = SessionPath.sessionDirectory(_scansDir, id);
+    if (dir == null || !dir.existsSync()) {
+      return null;
+    }
+
+    // Smile-clip bakes live under expression/baked/ (not session root).
+    final Directory exprBaked = Directory('${dir.path}/expression/baked');
+    if (exprBaked.existsSync()) {
+      final ScanFileEntry? fromExpr = await _newestObjIn(exprBaked);
+      if (fromExpr != null) {
+        return fromExpr;
+      }
+    }
+
     final List<ScanFileEntry> files = await listFiles(id);
     for (final ScanFileEntry file in files) {
       if (file.isObj) {
@@ -203,6 +268,52 @@ final class ScanStorage {
       }
     }
     return null;
+  }
+
+  Future<ScanFileEntry?> _newestObjIn(Directory dir) async {
+    final List<ScanFileEntry> objs = <ScanFileEntry>[];
+    await for (final FileSystemEntity entity in dir.list(followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      final String name =
+          entity.uri.pathSegments.where((String s) => s.isNotEmpty).last;
+      if (!name.toLowerCase().endsWith('.obj')) {
+        continue;
+      }
+      final FileStat stat = await entity.stat();
+      objs.add(
+        ScanFileEntry(
+          name: name,
+          path: entity.path,
+          sizeBytes: stat.size,
+          modified: stat.modified,
+        ),
+      );
+    }
+    if (objs.isEmpty) {
+      return null;
+    }
+    objs.sort(
+      (ScanFileEntry a, ScanFileEntry b) => b.modified.compareTo(a.modified),
+    );
+    // Prefer frame_000.obj for stable open; else newest.
+    for (final ScanFileEntry f in objs) {
+      if (f.name.startsWith('frame_000')) {
+        return f;
+      }
+    }
+    return objs.first;
+  }
+
+  /// Absolute path to `expression/baked` when this session has a smile bake.
+  String? expressionBakeDirectory(String id) {
+    final Directory? dir = SessionPath.sessionDirectory(_scansDir, id);
+    if (dir == null) {
+      return null;
+    }
+    final Directory baked = Directory('${dir.path}/expression/baked');
+    return baked.existsSync() ? baked.path : null;
   }
 
   /// Sets or clears the session's display name in `manifest.json`.

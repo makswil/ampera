@@ -10,8 +10,11 @@ import '../application/capture_bloc.dart';
 import '../application/capture_event.dart';
 import '../application/capture_state.dart';
 import '../application/capture_status.dart';
+import '../application/expression_sequence_bloc.dart';
+import '../application/model_generate_service.dart';
 import '../application/session_white_balance.dart';
 import '../data/arkit_face_tracking_service.dart';
+import '../data/bake/expression_sequence_baker.dart';
 import '../data/bake/session_baker.dart';
 import '../data/file_snapshot_repository.dart';
 import '../data/rear_face_tracking_service.dart';
@@ -23,6 +26,8 @@ import '../domain/entities/capture_actor_mode.dart';
 import '../domain/entities/capture_session.dart';
 import '../domain/entities/capture_snapshot.dart';
 import '../domain/entities/expression_mode.dart';
+import '../domain/entities/expression_sequence_phase.dart';
+import '../domain/entities/expression_sequence_result.dart';
 import '../domain/entities/face_pose.dart';
 import '../domain/entities/saved_session.dart';
 import '../domain/entities/still_capture.dart';
@@ -33,8 +38,8 @@ import '../domain/services/symmetry_axis_extractor.dart';
 import '../domain/value_objects/pose_tolerance.dart';
 import 'debug/capture_debug_hud.dart';
 import 'debug/debug_settings.dart';
-import 'face_scan_log.dart';
 import 'feedback/capture_feedback.dart';
+import 'obj_model_viewer_page.dart';
 import 'onboarding_store.dart';
 import 'pose_guidance_copy.dart';
 import 'scan_theme.dart';
@@ -56,8 +61,10 @@ class CapturePage extends StatefulWidget {
 }
 
 class _CapturePageState extends State<CapturePage> {
+  late final ArkitFaceTrackingService _frontTracking;
   late final TrackingBackendRouter _trackingService;
   late final CaptureBloc _bloc;
+  late final ExpressionSequenceBloc _expressionBloc;
   late final GuidedPoseValidator _guidedValidator;
   late final ExpressionAwarePoseValidator _poseValidator;
   final DebugSettings _debug = DebugSettings();
@@ -65,6 +72,9 @@ class _CapturePageState extends State<CapturePage> {
 
   /// Expression chosen in the idle picker; applied on the next Start.
   ExpressionMode _selectedExpression = ExpressionMode.neutral;
+
+  /// Last completed expression-sequence manifest (for Generate).
+  String? _expressionManifestPath;
 
   bool get _wantsRearPhoto =>
       _debug.actorMode == CaptureActorMode.practitioner &&
@@ -91,11 +101,15 @@ class _CapturePageState extends State<CapturePage> {
   /// eyes toggle changes) without re-capturing.
   CaptureSession? _lastSession;
   Directory? _lastDir;
-  bool _baking = false;
-  // Generate timing / ml-wb notes go to console — not the guidance surface.
+
+  /// App-scoped bake — survives leaving CapturePage (e.g. Saved Scans).
+  final ModelGenerateService _generate = ModelGenerateService.instance;
+  StreamSubscription<ModelGenerateKind>? _generateCompletedSub;
 
   /// Paths of the last baked model (obj/mtl/png), for the share sheet.
   BakedTexture? _baked;
+
+  bool get _baking => _generate.isRunning;
 
   /// Active sequential pass; null for single-pass runs / idle.
   CapturePass? _sequentialPass;
@@ -128,6 +142,11 @@ class _CapturePageState extends State<CapturePage> {
   Uint8List? _previewFreeze;
   bool _freezeOpaque = false;
 
+  /// Face-frame ring latched full until the capture click fades it.
+  bool _holdComplete = false;
+
+  ExpressionSequencePhase _lastExprPhase = ExpressionSequencePhase.idle;
+
   Future<void> _stillChain = Future<void>.value();
 
   Future<void> _grabStill(FacePose pose) async {
@@ -144,6 +163,11 @@ class _CapturePageState extends State<CapturePage> {
   }
 
   Future<void> _capturePoseStill(FacePose pose) async {
+    // One frame so the full accent ring paints on live preview before freeze.
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) {
+      return;
+    }
     Uint8List? freeze;
     if (_debug.hiResPhoto || _trackingService.isRear) {
       freeze = await _trackingService.previewFreeze();
@@ -158,27 +182,31 @@ class _CapturePageState extends State<CapturePage> {
     });
     final int capturedCount = _bloc.state.completedPoses.length;
     await _grabStill(pose);
-    await Future<void>.delayed(const Duration(milliseconds: 120));
     if (!mounted) {
       return;
     }
-    // Cue with freeze dissolve — not at freeze start (felt like “done” while still frozen).
-    setState(() {
-      _freezeOpaque = false;
-      _awaitingStill = false;
-    });
+    // Click = freeze lifts. Ring stays full ~0.5s so they can turn and see it.
     _triggerPoseCapturedFeedback(capturedCount);
-    if (_previewFreeze != null) {
-      await Future<void>.delayed(const Duration(milliseconds: 340));
-      if (mounted) {
-        setState(() => _previewFreeze = null);
-      }
+    setState(() => _freezeOpaque = false);
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    if (!mounted) {
+      return;
     }
+    setState(() => _holdComplete = false);
+    await Future<void>.delayed(const Duration(milliseconds: 280));
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _awaitingStill = false;
+      _previewFreeze = null;
+    });
   }
 
   /// Waits for every still to be captured, then persists the session.
   Future<void> _finishSession(CaptureState state) async {
     await _stillChain;
+    CaptureFeedback.scanCompleted();
     await _persist(state);
     _clearSequentialStash();
     await _syncIdlePreview();
@@ -203,6 +231,7 @@ class _CapturePageState extends State<CapturePage> {
       _awaitingStill = true;
       _previewFreeze = null;
       _freezeOpaque = false;
+      _holdComplete = false;
     });
     _bannerTimer?.cancel();
     _bannerTimer = Timer(const Duration(milliseconds: 2200), () {
@@ -276,8 +305,9 @@ class _CapturePageState extends State<CapturePage> {
   @override
   void initState() {
     super.initState();
+    _frontTracking = ArkitFaceTrackingService();
     _trackingService = TrackingBackendRouter(
-      front: ArkitFaceTrackingService(),
+      front: _frontTracking,
       rear: RearFaceTrackingService(),
     );
     const SymmetryAxisExtractor extractor = LeastSquaresSymmetryAxisExtractor();
@@ -287,6 +317,11 @@ class _CapturePageState extends State<CapturePage> {
       trackingService: _trackingService,
       poseValidator: _poseValidator,
     );
+    _expressionBloc = ExpressionSequenceBloc(
+      trackingService: _trackingService,
+      poseValidator: _guidedValidator,
+      expressionRecorder: _frontTracking,
+    );
     _syncDistanceTolerance();
 
     // Live preview immediately; Start only begins guided capture / saving.
@@ -294,8 +329,69 @@ class _CapturePageState extends State<CapturePage> {
 
     // Re-push the overlay config whenever a debug toggle changes.
     _debug.addListener(_onDebugChanged);
+    _generate.addListener(_onGenerateChanged);
+    _generateCompletedSub = _generate.completed.listen(_onGenerateCompleted);
     _applyOverlay();
     unawaited(_loadNewestSession());
+  }
+
+  void _onGenerateChanged() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    final String? error = _generate.error;
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not build model: $error')),
+      );
+      _generate.clearError();
+    }
+  }
+
+  void _onGenerateCompleted(ModelGenerateKind kind) {
+    if (!mounted) {
+      return;
+    }
+    // If user navigated away (Saved Scans etc.), open when they return.
+    if (ModalRoute.of(context)?.isCurrent != true) {
+      return;
+    }
+    unawaited(_consumeGenerateResult(kind));
+  }
+
+  Future<void> _consumeGenerateResult(ModelGenerateKind kind) async {
+    if (!_generate.pendingOpen) {
+      return;
+    }
+    switch (kind) {
+      case ModelGenerateKind.session:
+        final BakedTexture? baked = _generate.sessionResult;
+        setState(() => _baked = baked);
+        _generate.markOpened();
+        if (baked != null) {
+          _returnToScanAfterSessionBake();
+          await _openBakedViewer(
+            objPath: baked.objPath,
+            title: ExpressionMode.neutral.productLabel,
+          );
+        }
+      case ModelGenerateKind.expression:
+        final ExpressionSequenceBakeResult? baked = _generate.expressionResult;
+        _generate.markOpened();
+        if (baked != null) {
+          _returnToScanAfterSessionBake();
+          await _openBakedViewer(
+            objPath: baked.primaryObjPath,
+            title: ExpressionMode.smile.productLabel,
+            subtitle: '${baked.frames.length} frames',
+            sequenceObjPaths: <String>[
+              for (final ExpressionSequenceBakedFrame f in baked.frames)
+                f.objPath,
+            ],
+          );
+        }
+    }
   }
 
   Future<void> _prepareBackendForStart() async {
@@ -390,19 +486,56 @@ class _CapturePageState extends State<CapturePage> {
   void dispose() {
     _bannerTimer?.cancel();
     _debug.removeListener(_onDebugChanged);
+    _generate.removeListener(_onGenerateChanged);
+    unawaited(_generateCompletedSub?.cancel());
     _debug.dispose();
     // Bloc.close() tears down the tracking subscription/session.
+    // Bake keeps running on [ModelGenerateService] (app-scoped).
     unawaited(_bloc.close());
+    unawaited(_expressionBloc.close());
     unawaited(_trackingService.dispose());
     super.dispose();
   }
 
   Future<void> _handleStart() async {
     CaptureFeedback.reset();
-    final bool seen = await OnboardingStore.hasSeen();
+    final bool smile = _selectedExpression.isExpressionSequence;
+    final bool seen = _debug.forceFirstLaunch
+        ? _debug.howToShownThisLaunchFor(smile: smile)
+        : await OnboardingStore.hasSeen(smile: smile);
     if (!mounted) {
       return;
     }
+
+    if (_selectedExpression.isExpressionSequence) {
+      await _startExpressionSequence(seen: seen);
+      return;
+    }
+
+    if (!seen) {
+      final bool? started = await showScanOnboardingSheet(
+        context,
+        actorMode: guidanceActorMode(
+          actorMode: _debug.actorMode,
+          practitionerFlow: _debug.practitionerFlow,
+          meshMotion: _debug.meshMotion,
+          clinicianCamera: _debug.clinicianCamera,
+        ),
+        expression: ExpressionMode.neutral,
+        onStart: () {
+          _markHowToSeen(smile: false);
+          unawaited(_beginNeutralCapture());
+        },
+      );
+      if (started != true) {
+        _markHowToSeen(smile: false);
+      }
+      return;
+    }
+    await _beginNeutralCapture();
+  }
+
+  Future<void> _beginNeutralCapture() async {
     if (_wantsPriorMeshPhotoOnly) {
       final bool ready = await _preparePriorMeshRef();
       if (!ready || !mounted) {
@@ -419,27 +552,53 @@ class _CapturePageState extends State<CapturePage> {
     if (_wantsSequentialMeshThenRear) {
       _sequentialPass = CapturePass.mesh;
     }
-    // Rear Vision has no blendshapes — smile gate would block forever.
-    // Mesh pass of a sequential run uses front TrueDepth (smile OK).
-    final bool photoOnlyPass =
-        _sequentialPass == CapturePass.photo ||
-        (_wantsRearPhoto && _sequentialPass != CapturePass.mesh);
-    final ExpressionMode expression =
-        photoOnlyPass ? ExpressionMode.neutral : _selectedExpression;
-    // Mesh pass guidance uses front camera semantics even when photos are rear.
     final ClinicianCamera startCamera = _sequentialPass == CapturePass.mesh
         ? ClinicianCamera.front
         : _debug.clinicianCamera;
-    final CaptureStarted start = CaptureStarted(
-      expressionMode: expression,
-      actorMode: _debug.actorMode,
-      practitionerFlow: _debug.practitionerFlow,
-      meshMotion: _debug.meshMotion,
-      clinicianCamera: startCamera,
-      rearCaptureKind: _debug.rearCaptureKind,
+    setState(() {
+      _didPersistCurrent = false;
+      _baked = null;
+    });
+    _bloc.add(
+      CaptureStarted(
+        expressionMode: ExpressionMode.neutral,
+        actorMode: _debug.actorMode,
+        practitionerFlow: _debug.practitionerFlow,
+        meshMotion: _debug.meshMotion,
+        clinicianCamera: startCamera,
+        rearCaptureKind: _debug.rearCaptureKind,
+      ),
     );
+  }
+
+  Future<void> _startExpressionSequence({required bool seen}) async {
+    Future<void> kickoff() async {
+      if (_trackingService.backend != TrackingBackend.front) {
+        await _trackingService.select(TrackingBackend.front);
+        if (mounted) {
+          setState(() {});
+        }
+      }
+      await _trackingService.setRearPreferVideo(false);
+      _clearSequentialStash();
+      _expressionManifestPath = null;
+      setState(() {
+        _didPersistCurrent = false;
+        _baked = null;
+      });
+      final Directory documents = await getApplicationDocumentsDirectory();
+      final String sessionId =
+          'expr_${DateTime.now().millisecondsSinceEpoch}';
+      final Directory sessionDir = Directory(
+        '${documents.path}/face_scans/$sessionId',
+      );
+      await sessionDir.create(recursive: true);
+      _expressionBloc.add(
+        ExpressionSequenceStarted(directoryPath: sessionDir.path),
+      );
+    }
+
     if (!seen) {
-      await _trackingService.dismissPresented();
       if (!mounted) {
         return;
       }
@@ -449,26 +608,48 @@ class _CapturePageState extends State<CapturePage> {
           actorMode: _debug.actorMode,
           practitionerFlow: _debug.practitionerFlow,
           meshMotion: _debug.meshMotion,
-          clinicianCamera: _debug.clinicianCamera,
+          clinicianCamera: ClinicianCamera.front,
         ),
+        expression: ExpressionMode.smile,
         onStart: () {
-          unawaited(OnboardingStore.markSeen());
-          _bloc.add(start);
+          _markHowToSeen(smile: true);
+          unawaited(kickoff());
         },
       );
       if (started != true) {
-        // User dismissed without starting — still mark seen so they aren't
-        // blocked; they can reopen help via the `?` button.
-        unawaited(OnboardingStore.markSeen());
+        _markHowToSeen(smile: true);
       }
       return;
     }
-    _bloc.add(start);
+    await kickoff();
+  }
+
+  void _markHowToSeen({required bool smile}) {
+    _debug.markHowToShownThisLaunchFor(smile: smile);
+    unawaited(OnboardingStore.markSeen(smile: smile));
+  }
+
+  void _dismissNativeModals() {
+    unawaited(_trackingService.dismissPresented());
+  }
+
+  static bool _isRingHoldPhase(ExpressionSequencePhase phase) =>
+      phase == ExpressionSequencePhase.aeSettle ||
+      phase == ExpressionSequencePhase.supportLeft ||
+      phase == ExpressionSequencePhase.supportRight ||
+      phase == ExpressionSequencePhase.supportUp;
+
+  /// Visual cue after the click: keep the full ring while they turn to look.
+  Future<void> _fadeHoldRingAfterTurn() async {
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    if (!mounted || !_holdComplete) {
+      return;
+    }
+    setState(() => _holdComplete = false);
   }
 
   void _showHowToScan() {
     unawaited(() async {
-      await _trackingService.dismissPresented();
       if (!mounted) {
         return;
       }
@@ -480,6 +661,7 @@ class _CapturePageState extends State<CapturePage> {
           meshMotion: _debug.meshMotion,
           clinicianCamera: _debug.clinicianCamera,
         ),
+        expression: _selectedExpression,
         onStart: () {},
         showStartButton: false,
       );
@@ -487,9 +669,17 @@ class _CapturePageState extends State<CapturePage> {
   }
 
   Future<void> _openScansManager() async {
-    await _trackingService.dismissPresented();
+    _dismissNativeModals();
     if (!mounted) {
       return;
+    }
+    if (_baking) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Creating 3D model in the background…'),
+          duration: Duration(seconds: 2),
+        ),
+      );
     }
     setState(() => _platformPreviewVisible = false);
     try {
@@ -501,6 +691,11 @@ class _CapturePageState extends State<CapturePage> {
     } finally {
       if (mounted) {
         setState(() => _platformPreviewVisible = true);
+        // Bake may have finished while browsing Saved Scans.
+        final ModelGenerateKind? kind = _generate.kind;
+        if (_generate.pendingOpen && kind != null) {
+          unawaited(_consumeGenerateResult(kind));
+        }
       }
     }
   }
@@ -547,7 +742,7 @@ class _CapturePageState extends State<CapturePage> {
   }
 
   Future<void> _pickPriorMeshScan() async {
-    await _trackingService.dismissPresented();
+    _dismissNativeModals();
     if (!mounted) {
       return;
     }
@@ -724,6 +919,15 @@ class _CapturePageState extends State<CapturePage> {
             onChanged: (bool v) => _debug.showMesh = v,
           ),
           if (_debug.isDev) ...<Widget>[
+            SwitchListTile(
+              title: const Text('First-time how-to'),
+              subtitle: const Text(
+                'On = show how-to once per app launch for each scan type '
+                '(3D model / expression clip). Off = remember across launches.',
+              ),
+              value: _debug.forceFirstLaunch,
+              onChanged: (bool v) => _debug.forceFirstLaunch = v,
+            ),
             ListTile(
               title: Text(
                 'Face distance: '
@@ -759,12 +963,28 @@ class _CapturePageState extends State<CapturePage> {
             SwitchListTile(
               title: const Text('Lock AE/AWB after first shot'),
               subtitle: const Text(
-                'On = reuse ISO/shutter/WB from the first pose of each '
-                'camera pass (front hi-res + rear photo/video). '
-                'Off = auto per pose.',
+                '4-pose: lock after first still (front hi-res + rear). '
+                'Expression clip: always settles+locks before side photos (this toggle '
+                'does not apply). Off = auto per pose for 4-pose only.',
               ),
               value: _debug.lockAeAwb,
               onChanged: (bool v) => _debug.lockAeAwb = v,
+            ),
+            SwitchListTile(
+              title: const Text('ml-wb (4-pose)'),
+              subtitle: const Text(
+                'Default on. CoreML white-balance for multipose Generate.',
+              ),
+              value: _debug.mlWb,
+              onChanged: (bool v) => _debug.mlWb = v,
+            ),
+            SwitchListTile(
+              title: const Text('ml-wb (expression clip)'),
+              subtitle: const Text(
+                'Default off — many frames. Enable to A/B (console timing).',
+              ),
+              value: _debug.mlWbExpression,
+              onChanged: (bool v) => _debug.mlWbExpression = v,
             ),
           ],
         ];
@@ -777,31 +997,41 @@ class _CapturePageState extends State<CapturePage> {
       title: 'Model settings',
       buildChildren: () => <Widget>[
         SwitchListTile(
-          title: const Text('ml-wb white balance'),
+          title: const Text('ml-wb (4-pose)'),
           subtitle: const Text(
-            'CoreML white-balance on pose stills before bake. '
+            'Default on. White-balance pose stills before bake. '
             'Generate again to apply.',
           ),
           value: _debug.mlWb,
           onChanged: (bool v) => _debug.mlWb = v,
         ),
         SwitchListTile(
+          title: const Text('ml-wb (expression clip)'),
+          subtitle: const Text(
+            'Default off. White-balance every expression-clip frame before bake. '
+            'Generate again to apply.',
+          ),
+          value: _debug.mlWbExpression,
+          onChanged: (bool v) => _debug.mlWbExpression = v,
+        ),
+        SwitchListTile(
           title: const Text('ml-wb: match frontal'),
           subtitle: Text(
-            _debug.mlWb
-                ? 'On = all poses → frontal Kelvin. '
-                    'Off = all poses → default '
+            (_debug.mlWb || _debug.mlWbExpression)
+                ? 'On = all inputs → frontal Kelvin. '
+                    'Off = all inputs → default '
                     '${CaptureDefaults.neutralKelvin.round()} K.'
-                : 'Enable ml-wb first.',
+                : 'Enable an ml-wb toggle first.',
           ),
           value: _debug.mlWbMatchFrontal,
-          onChanged:
-              _debug.mlWb ? (bool v) => _debug.mlWbMatchFrontal = v : null,
+          onChanged: (_debug.mlWb || _debug.mlWbExpression)
+              ? (bool v) => _debug.mlWbMatchFrontal = v
+              : null,
         ),
         const Divider(height: 1),
         SwitchListTile(
-          title: const Text('Fill eye holes'),
-          subtitle: const Text('Off = leave ARKit holes in the model'),
+          title: const Text('Fill eye & mouth holes'),
+          subtitle: const Text('Off = leave ARKit apertures open in the model'),
           value: _debug.fillHoles,
           onChanged: (bool v) => _debug.fillHoles = v,
         ),
@@ -871,9 +1101,9 @@ class _CapturePageState extends State<CapturePage> {
                 ? 'No session loaded'
                 : (_debug.mlWb
                     ? (_debug.mlWbMatchFrontal
-                        ? 'ml-wb → frontal Kelvin'
-                        : 'ml-wb → ${CaptureDefaults.neutralKelvin.round()} K')
-                    : 'ml-wb off'),
+                        ? '4-pose ml-wb → frontal Kelvin'
+                        : '4-pose ml-wb → ${CaptureDefaults.neutralKelvin.round()} K')
+                    : '4-pose ml-wb off'),
           ),
           enabled: !_baking && _lastSession != null,
           onTap: _baking || _lastSession == null
@@ -892,12 +1122,13 @@ class _CapturePageState extends State<CapturePage> {
     required String title,
     required List<Widget> Function() buildChildren,
   }) async {
-    // Share sheet can leave a native modal that blocks Flutter routes.
-    await _trackingService.dismissPresented();
+    _dismissNativeModals();
     if (!mounted) {
       return;
     }
-    await Navigator.of(context).push<void>(
+    setState(() => _platformPreviewVisible = false);
+    try {
+      await Navigator.of(context).push<void>(
       PageRouteBuilder<void>(
         pageBuilder: (
           BuildContext pageContext,
@@ -905,7 +1136,7 @@ class _CapturePageState extends State<CapturePage> {
           Animation<double> secondaryAnimation,
         ) {
           return ListenableBuilder(
-            listenable: Listenable.merge(<Listenable>[_debug, _theme]),
+            listenable: Listenable.merge(<Listenable>[_debug, _theme, _generate]),
             builder: (BuildContext context, Widget? _) {
               final ColorScheme scheme = Theme.of(context).colorScheme;
               const double pageInset = 28;
@@ -1002,6 +1233,17 @@ class _CapturePageState extends State<CapturePage> {
         reverseTransitionDuration: const Duration(milliseconds: 140),
       ),
     );
+    } finally {
+      if (mounted) {
+        setState(() => _platformPreviewVisible = true);
+      }
+    }
+    if (mounted) {
+      final ModelGenerateKind? kind = _generate.kind;
+      if (_generate.pendingOpen && kind != null) {
+        unawaited(_consumeGenerateResult(kind));
+      }
+    }
   }
 
   /// Persists the captured snapshots once the session completes (one-shot).
@@ -1064,80 +1306,71 @@ class _CapturePageState extends State<CapturePage> {
     }
   }
 
-  /// Generates (or regenerates) the last saved session's textured model with
-  /// the current model settings. No-op if nothing is saved yet or a generate
-  /// is already running.
+  /// Generates (or regenerates) the last saved session / expression clip with the
+  /// current model settings. Runs on [ModelGenerateService] so leaving this
+  /// page (Saved Scans) does not cancel the bake.
   Future<void> _bakeTexture() async {
+    final String? exprManifest = _resolveExpressionManifestPath();
+    if (exprManifest != null) {
+      await _bakeExpressionSequence(exprManifest);
+      return;
+    }
+
     final CaptureSession? session = _lastSession;
     final Directory? dir = _lastDir;
     if (session == null || dir == null || _baking) {
       return;
     }
-    setState(() {
-      _baking = true;
-    });
-    try {
-      String? mlWbNote;
-      CaptureSession bakeSession = session;
-      final Stopwatch wall = Stopwatch()..start();
-      int? mlWbMs;
-      if (_debug.mlWb) {
-        final Stopwatch mlSw = Stopwatch()..start();
-        final ({CaptureSession session, String note}) applied =
-            await _applyMlWb(session);
-        mlWbMs = mlSw.elapsedMilliseconds;
-        bakeSession = applied.session;
-        mlWbNote = applied.note;
-      }
-      // Dart poseGain is its own toggle (combinable with ml-wb).
-      final Stopwatch bakeSw = Stopwatch()..start();
-      final BakedTexture? baked = await const SessionTextureBaker().bake(
-        session: bakeSession,
-        directory: dir,
-        fillHoles: _debug.fillHoles,
-        textureSize: 0, // 0 = Original (source photo resolution)
-        useChinUp: _debug.chinUpLowerFace,
-        viewDependent: _debug.viewDependent,
-        viewBlend: !_debug.viewBestOnly,
-        colorMatch: _debug.viewDependent && _debug.dartColorGain,
-        colorMatchNeutral: false,
-        bakeNormalMap: _debug.bakeNormalMap,
-      );
-      final int bakeMs = bakeSw.elapsedMilliseconds;
-      wall.stop();
-      final String bakeTiming = baked?.timingSummary ?? 'bake ${bakeMs}ms';
-      final String timingLine = mlWbMs == null
-          ? '$bakeTiming · wall ${wall.elapsedMilliseconds}ms'
-          : 'ml-wb ${mlWbMs}ms · $bakeTiming · wall ${wall.elapsedMilliseconds}ms';
-      faceScanLog(
-        '$timingLine${mlWbNote != null ? ' | $mlWbNote' : ''}',
-      );
-      if (mounted) {
-        setState(() {
-          _baking = false;
-          _baked = baked;
-        });
-      }
-    } on Object catch (e) {
-      faceScanLog('Generate failed: $e');
-      if (mounted) {
-        setState(() {
-          _baking = false;
-        });
-      }
-    }
+    await _generate.generateSession(
+      session: session,
+      directory: dir,
+      mlWb: _debug.mlWb,
+      mlWbMatchFrontal: _debug.mlWbMatchFrontal,
+      fillHoles: _debug.fillHoles,
+      useChinUp: _debug.chinUpLowerFace,
+      viewDependent: _debug.viewDependent,
+      viewBestOnly: _debug.viewBestOnly,
+      dartColorGain: _debug.dartColorGain,
+      bakeNormalMap: _debug.bakeNormalMap,
+      correctWhiteBalance: _wbCorrector,
+    );
   }
 
-  /// Runs on-device ml-wb over every pose still. Frontal is always first so
-  /// `matchFrontal` can use it as the shared Kelvin target.
-  Future<({CaptureSession session, String note})> _applyMlWb(
-    CaptureSession session,
-  ) {
-    return applySessionWhiteBalance(
-      session: session,
-      matchFrontal: _debug.mlWbMatchFrontal,
-      targetKelvin: CaptureDefaults.neutralKelvin,
-      correct: ({
+  /// Absolute `expression/sequence.json` when an expression clip is ready to bake.
+  String? _resolveExpressionManifestPath() {
+    final String? stored = _expressionManifestPath;
+    if (stored != null && stored.isNotEmpty && File(stored).existsSync()) {
+      return stored;
+    }
+    final Directory? dir = _lastDir;
+    if (dir != null) {
+      final String fallback = '${dir.path}/expression/sequence.json';
+      if (File(fallback).existsSync()) {
+        _expressionManifestPath = fallback;
+        return fallback;
+      }
+    }
+    // Stale path still routes to expression bake (clearer error than multipose).
+    if (stored != null && stored.isNotEmpty) {
+      return stored;
+    }
+    return null;
+  }
+
+  Future<void> _bakeExpressionSequence(String manifestPath) async {
+    if (_baking) {
+      return;
+    }
+    await _generate.generateExpression(
+      manifestPath: manifestPath,
+      mlWb: _debug.mlWbExpression,
+      mlWbMatchFrontal: _debug.mlWbMatchFrontal,
+      fillHoles: _debug.fillHoles,
+      correctWhiteBalance: _wbCorrector,
+    );
+  }
+
+  ModelGenerateWbCorrector get _wbCorrector => ({
         required List<Uint8List> jpegs,
         required bool matchFrontal,
         required double targetKelvin,
@@ -1158,8 +1391,270 @@ class _CapturePageState extends State<CapturePage> {
           error: result.error,
           timingSummary: result.timingSummary,
         );
-      },
-    );
+      };
+
+  Future<void> _openBakedViewer({
+    required String objPath,
+    required String title,
+    String? subtitle,
+    List<String>? sequenceObjPaths,
+  }) async {
+    _dismissNativeModals();
+    if (!mounted) {
+      return;
+    }
+    setState(() => _platformPreviewVisible = false);
+    try {
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => ObjModelViewerPage(
+            objPath: objPath,
+            title: title,
+            subtitle: subtitle,
+            sequenceObjPaths: sequenceObjPaths,
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _platformPreviewVisible = true);
+      }
+    }
+  }
+
+  /// After bake the model exists — drop Rescan/Generate, keep Start.
+  void _returnToScanAfterSessionBake() {
+    CaptureFeedback.reset();
+    _bannerTimer?.cancel();
+    if (_bloc.state.status != CaptureStatus.idle) {
+      _bloc.add(const CaptureStopped());
+    }
+    if (_expressionBloc.state.phase != ExpressionSequencePhase.idle) {
+      _expressionBloc.add(const ExpressionSequenceStopped());
+    }
+    _clearSequentialStash();
+    setState(() {
+      _stills.clear();
+      _stillChain = Future<void>.value();
+      _lastCompletedCount = 0;
+      _captureBanner = null;
+      _awaitingStill = false;
+      _previewFreeze = null;
+      _freezeOpaque = false;
+      _holdComplete = false;
+      _lastExprPhase = ExpressionSequencePhase.idle;
+      _didPersistCurrent = false;
+      _expressionManifestPath = null;
+    });
+  }
+
+  CaptureState _resolveOverlayCaptureState(
+    CaptureState captureState,
+    ExpressionSequenceState exprState,
+  ) {
+    if (exprState.phase != ExpressionSequencePhase.idle) {
+      return _overlayStateForExpression(exprState);
+    }
+    if (_expressionManifestPath != null &&
+        captureState.status == CaptureStatus.idle) {
+      return const CaptureState(
+        status: CaptureStatus.completed,
+        currentPose: null,
+        completedPoses: <FacePose>[FacePose.frontal],
+        snapshots: <CaptureSnapshot>[],
+        lastValidation: null,
+        holdProgress: 0,
+        errorMessage: null,
+        expressionMode: ExpressionMode.smile,
+      );
+    }
+    return captureState;
+  }
+
+  CaptureState _overlayStateForExpression(ExpressionSequenceState expr) {
+    switch (expr.phase) {
+      case ExpressionSequencePhase.idle:
+        return const CaptureState.initial();
+      case ExpressionSequencePhase.completed:
+        return CaptureState(
+          status: CaptureStatus.completed,
+          currentPose: null,
+          completedPoses: const <FacePose>[FacePose.frontal],
+          snapshots: const <CaptureSnapshot>[],
+          lastValidation: expr.lastValidation,
+          holdProgress: 0,
+          errorMessage: null,
+          expressionMode: ExpressionMode.smile,
+        );
+      case ExpressionSequencePhase.error:
+        return CaptureState(
+          status: CaptureStatus.error,
+          currentPose: null,
+          completedPoses: const <FacePose>[],
+          snapshots: const <CaptureSnapshot>[],
+          lastValidation: expr.lastValidation,
+          holdProgress: 0,
+          errorMessage: expr.errorMessage,
+          expressionMode: ExpressionMode.smile,
+        );
+      case ExpressionSequencePhase.aeSettle:
+        return CaptureState(
+          status: CaptureStatus.capturing,
+          currentPose: FacePose.frontal,
+          completedPoses: const <FacePose>[],
+          snapshots: const <CaptureSnapshot>[],
+          lastValidation: expr.lastValidation,
+          holdProgress: expr.supportHoldProgress,
+          errorMessage: null,
+          expressionMode: ExpressionMode.neutral,
+        );
+      case ExpressionSequencePhase.supportLeft:
+      case ExpressionSequencePhase.supportRight:
+      case ExpressionSequencePhase.supportUp:
+        return CaptureState(
+          status: CaptureStatus.capturing,
+          currentPose: expr.supportPose ?? FacePose.left40,
+          completedPoses: switch (expr.phase) {
+            ExpressionSequencePhase.supportRight =>
+              const <FacePose>[FacePose.left40],
+            ExpressionSequencePhase.supportUp =>
+              const <FacePose>[FacePose.left40, FacePose.right40],
+            _ => const <FacePose>[],
+          },
+          snapshots: const <CaptureSnapshot>[],
+          lastValidation: expr.lastValidation,
+          // Ring shows support hold — same cue as 4-pose.
+          holdProgress: expr.supportHoldProgress,
+          errorMessage: null,
+          // Pose copy ("Turn left") — not expression-clip coaching.
+          expressionMode: ExpressionMode.neutral,
+        );
+      case ExpressionSequencePhase.settling:
+        return CaptureState(
+          status: CaptureStatus.capturing,
+          currentPose: FacePose.frontal,
+          completedPoses: const <FacePose>[
+            FacePose.left40,
+            FacePose.right40,
+            FacePose.up,
+          ],
+          snapshots: const <CaptureSnapshot>[],
+          lastValidation: expr.lastValidation,
+          // Green outline while they line up — same cue as 4-pose.
+          holdProgress: (expr.lastValidation?.isOnTarget ?? false)
+              ? 1
+              : expr.readyProgress,
+          errorMessage: null,
+          expressionMode: ExpressionMode.neutral,
+        );
+      case ExpressionSequencePhase.countdown:
+        return CaptureState(
+          status: CaptureStatus.capturing,
+          currentPose: FacePose.frontal,
+          completedPoses: const <FacePose>[
+            FacePose.left40,
+            FacePose.right40,
+            FacePose.up,
+          ],
+          snapshots: const <CaptureSnapshot>[],
+          lastValidation: expr.lastValidation,
+          holdProgress: (expr.lastValidation?.isOnTarget ?? false) ? 1 : 0,
+          errorMessage: null,
+          expressionMode: ExpressionMode.neutral,
+        );
+      case ExpressionSequencePhase.buffering:
+      case ExpressionSequencePhase.recording:
+      case ExpressionSequencePhase.hiResEnd:
+        return CaptureState(
+          status: CaptureStatus.capturing,
+          currentPose: FacePose.frontal,
+          completedPoses: const <FacePose>[
+            FacePose.left40,
+            FacePose.right40,
+            FacePose.up,
+          ],
+          snapshots: const <CaptureSnapshot>[],
+          lastValidation: expr.lastValidation,
+          holdProgress: 0,
+          errorMessage: null,
+          expressionMode: ExpressionMode.smile,
+        );
+    }
+  }
+
+  ({String? title, String? subtitle, int? countdown}) _expressionCoach(
+    ExpressionSequenceState expr,
+  ) {
+    switch (expr.phase) {
+      // Prep phases: same LiveGuidance + HeadPoseHint as 4-pose.
+      case ExpressionSequencePhase.aeSettle:
+      case ExpressionSequencePhase.supportLeft:
+      case ExpressionSequencePhase.supportRight:
+      case ExpressionSequencePhase.supportUp:
+        return (title: null, subtitle: null, countdown: null);
+      case ExpressionSequencePhase.settling:
+        if (expr.lastValidation?.isOnTarget ?? false) {
+          return (
+            title: 'Hold still',
+            subtitle: 'Looking good — countdown starts next',
+            countdown: null,
+          );
+        }
+        // Off-target: LiveGuidance (turn / closer) instead of the coach.
+        return (title: null, subtitle: null, countdown: null);
+      case ExpressionSequencePhase.countdown:
+        return (
+          title: 'Get ready',
+          subtitle: 'Stay in the outline — change expression after the countdown',
+          countdown: expr.countdownSeconds,
+        );
+      case ExpressionSequencePhase.buffering:
+        final bool onTarget = expr.lastValidation?.isOnTarget ?? false;
+        final bool moving = expr.smileScore >= 0.10;
+        return (
+          title: 'Change expression',
+          subtitle: !onTarget
+              ? 'Keep your face in the outline'
+              : (moving
+                  ? 'Good — keep going slowly'
+                  : 'Start changing expression slowly'),
+          countdown: null,
+        );
+      case ExpressionSequencePhase.recording:
+        final bool onTarget = expr.lastValidation?.isOnTarget ?? false;
+        return (
+          title: 'Keep going',
+          subtitle: onTarget
+              ? 'Recording…'
+              : 'Stay centered — keep going',
+          countdown: null,
+        );
+      case ExpressionSequencePhase.hiResEnd:
+        if (expr.recordingProgress >= 0.995) {
+          return (
+            title: 'Done',
+            subtitle: 'Saving…',
+            countdown: null,
+          );
+        }
+        final bool onTarget = expr.lastValidation?.isOnTarget ?? false;
+        return (
+          title: 'Keep going',
+          subtitle: onTarget
+              ? 'Recording…'
+              : 'Stay centered — keep going',
+          countdown: null,
+        );
+      case ExpressionSequencePhase.completed:
+        return (
+          title: 'Expression clip saved',
+          subtitle: 'Tap Generate 3D to review',
+          countdown: null,
+        );
+      case ExpressionSequencePhase.idle:
+      case ExpressionSequencePhase.error:
+        return (title: null, subtitle: null, countdown: null);
+    }
   }
 
   /// Cancels the running scan back to idle and discards the partial captures.
@@ -1177,6 +1672,9 @@ class _CapturePageState extends State<CapturePage> {
     if (_bloc.state.status != CaptureStatus.idle) {
       _bloc.add(const CaptureStopped());
     }
+    if (_expressionBloc.state.phase != ExpressionSequencePhase.idle) {
+      _expressionBloc.add(const ExpressionSequenceStopped());
+    }
     _clearSequentialStash();
     setState(() {
       _stills.clear();
@@ -1186,6 +1684,9 @@ class _CapturePageState extends State<CapturePage> {
       _awaitingStill = false;
       _previewFreeze = null;
       _freezeOpaque = false;
+      _holdComplete = false;
+      _lastExprPhase = ExpressionSequencePhase.idle;
+      _expressionManifestPath = null;
     });
   }
 
@@ -1223,10 +1724,13 @@ class _CapturePageState extends State<CapturePage> {
 
   @override
   Widget build(BuildContext context) {
-    return BlocProvider<CaptureBloc>.value(
-      value: _bloc,
+    return MultiBlocProvider(
+      providers: <BlocProvider<dynamic>>[
+        BlocProvider<CaptureBloc>.value(value: _bloc),
+        BlocProvider<ExpressionSequenceBloc>.value(value: _expressionBloc),
+      ],
       child: MultiBlocListener(
-        listeners: <BlocListener<CaptureBloc, CaptureState>>[
+        listeners: <BlocListener<dynamic, dynamic>>[
           BlocListener<CaptureBloc, CaptureState>(
             listenWhen: (CaptureState prev, CaptureState next) =>
                 prev.status != next.status ||
@@ -1235,8 +1739,12 @@ class _CapturePageState extends State<CapturePage> {
               if (state.completedPoses.length > _lastCompletedCount) {
                 final FacePose pose = state.completedPoses.last;
                 // Sync flag before this frame builds — otherwise completed copy
-                // flashes over the freeze on the last pose.
-                setState(() => _awaitingStill = true);
+                // flashes over the freeze on the last pose. Latch the ring full
+                // so the last schnipsel fills before the still.
+                setState(() {
+                  _awaitingStill = true;
+                  _holdComplete = true;
+                });
                 _stillChain = _stillChain.then((_) => _capturePoseStill(pose));
               }
               _lastCompletedCount = state.completedPoses.length;
@@ -1246,7 +1754,6 @@ class _CapturePageState extends State<CapturePage> {
                   // First pass done — hand off to rear without persisting yet.
                   unawaited(_handoffMeshToPhotoPass(state));
                 } else {
-                  CaptureFeedback.scanCompleted();
                   unawaited(_finishSession(state));
                 }
               } else if (state.status == CaptureStatus.error) {
@@ -1265,14 +1772,16 @@ class _CapturePageState extends State<CapturePage> {
                   _awaitingStill = false;
                   _previewFreeze = null;
                   _freezeOpaque = false;
+                  _holdComplete = false;
                 });
               } else if (state.status == CaptureStatus.idle) {
                 CaptureFeedback.reset();
-                if (_awaitingStill || _previewFreeze != null) {
+                if (_awaitingStill || _previewFreeze != null || _holdComplete) {
                   setState(() {
                     _awaitingStill = false;
                     _previewFreeze = null;
                     _freezeOpaque = false;
+                    _holdComplete = false;
                   });
                 }
               }
@@ -1294,6 +1803,59 @@ class _CapturePageState extends State<CapturePage> {
               }
             },
           ),
+          BlocListener<ExpressionSequenceBloc, ExpressionSequenceState>(
+            listenWhen: (
+              ExpressionSequenceState prev,
+              ExpressionSequenceState next,
+            ) =>
+                prev.phase != next.phase ||
+                prev.countdownSeconds != next.countdownSeconds ||
+                prev.supportHoldProgress != next.supportHoldProgress,
+            listener: (BuildContext context, ExpressionSequenceState state) {
+              final ExpressionSequencePhase prevPhase = _lastExprPhase;
+              if (state.supportHoldProgress >= 0.999 &&
+                  _isRingHoldPhase(state.phase) &&
+                  !_holdComplete) {
+                setState(() => _holdComplete = true);
+              }
+              if (prevPhase != state.phase &&
+                  _isRingHoldPhase(prevPhase) &&
+                  state.phase != ExpressionSequencePhase.error) {
+                CaptureFeedback.poseCaptured();
+                unawaited(_fadeHoldRingAfterTurn());
+              }
+              _lastExprPhase = state.phase;
+
+              if (state.phase == ExpressionSequencePhase.completed) {
+                CaptureFeedback.scanCompleted();
+                final ExpressionSequenceResult? result = state.result;
+                setState(() {
+                  _expressionManifestPath = result?.manifestPath;
+                  _didPersistCurrent = result != null;
+                  _lastDir = result == null
+                      ? null
+                      : Directory(result.directoryPath);
+                  _captureBanner = null;
+                });
+              } else if (state.phase == ExpressionSequencePhase.error) {
+                unawaited(_syncIdlePreview());
+                setState(() {
+                  _captureBanner = null;
+                  _holdComplete = false;
+                });
+                if (state.errorMessage != null && mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(state.errorMessage!)),
+                  );
+                }
+              } else {
+                // Coach UI comes from expressionTitle — keep banner clear.
+                if (_captureBanner != null) {
+                  setState(() => _captureBanner = null);
+                }
+              }
+            },
+          ),
         ],
         child: Scaffold(
           backgroundColor: Theme.of(context).scaffoldBackgroundColor,
@@ -1312,7 +1874,7 @@ class _CapturePageState extends State<CapturePage> {
                 IgnorePointer(
                   child: AnimatedOpacity(
                     opacity: _freezeOpaque ? 1 : 0,
-                    duration: const Duration(milliseconds: 320),
+                    duration: const Duration(milliseconds: 220),
                     curve: Curves.easeOut,
                     child: Image.memory(
                       _previewFreeze!,
@@ -1328,30 +1890,78 @@ class _CapturePageState extends State<CapturePage> {
                 listenable: _debug,
                 builder: (BuildContext context, Widget? _) =>
                     BlocBuilder<CaptureBloc, CaptureState>(
-                  builder: (BuildContext context, CaptureState state) =>
-                      CaptureOverlay(
-                    state: state,
-                    onStart: () => unawaited(_handleStart()),
-                    onRetake: () => unawaited(_handleStart()),
-                    onGenerateModel: () => unawaited(_bakeTexture()),
-                    canGenerateModel: _lastSession != null && !_baking,
-                    generatingModel: _baking,
-                    onOpenSettings: () =>
-                        unawaited(_trackingService.openAppSettings()),
-                    targetDistanceMeters: _debug.targetDistanceMeters,
-                    captureBanner: _captureBanner,
-                    deferPoseGuidance: _awaitingStill,
-                    statusLine: _consumerStatusLine(),
-                    selectedExpression: _selectedExpression,
-                    onExpressionChanged: (ExpressionMode mode) {
-                      setState(() => _selectedExpression = mode);
+                  builder: (BuildContext context, CaptureState captureState) =>
+                      BlocBuilder<ExpressionSequenceBloc,
+                          ExpressionSequenceState>(
+                    builder: (
+                      BuildContext context,
+                      ExpressionSequenceState exprState,
+                    ) {
+                      final CaptureState state =
+                          _resolveOverlayCaptureState(captureState, exprState);
+                      final bool exprActive =
+                          exprState.phase != ExpressionSequencePhase.idle &&
+                          exprState.phase != ExpressionSequencePhase.error;
+                      final ({String? title, String? subtitle, int? countdown})
+                      coach = _expressionCoach(exprState);
+                      final bool smileRecordPhase =
+                          exprState.phase ==
+                              ExpressionSequencePhase.buffering ||
+                          exprState.phase ==
+                              ExpressionSequencePhase.recording ||
+                          exprState.phase == ExpressionSequencePhase.hiResEnd;
+                      return CaptureOverlay(
+                        state: state,
+                        onStart: () => unawaited(_handleStart()),
+                        onRetake: () {
+                          if (exprState.phase !=
+                              ExpressionSequencePhase.idle) {
+                            _expressionBloc.add(
+                              const ExpressionSequenceStopped(),
+                            );
+                          }
+                          _expressionManifestPath = null;
+                          unawaited(_handleStart());
+                        },
+                        onGenerateModel: () => unawaited(_bakeTexture()),
+                        canGenerateModel:
+                            (_lastSession != null ||
+                                _expressionManifestPath != null) &&
+                            !_baking,
+                        hasGeneratedModel:
+                            _baked != null && _expressionManifestPath == null,
+                        generatingModel: _baking,
+                        onOpenSettings: () =>
+                            unawaited(_trackingService.openAppSettings()),
+                        targetDistanceMeters: _debug.targetDistanceMeters,
+                        captureBanner: _captureBanner,
+                        deferPoseGuidance: _awaitingStill,
+                        holdComplete: _holdComplete,
+                        statusLine: _consumerStatusLine(),
+                        selectedExpression: _selectedExpression,
+                        onExpressionChanged: (ExpressionMode mode) {
+                          setState(() => _selectedExpression = mode);
+                        },
+                        selectedActorMode: _debug.actorMode,
+                        selectedPractitionerFlow: _debug.practitionerFlow,
+                        selectedMeshMotion: _debug.meshMotion,
+                        selectedClinicianCamera: _debug.clinicianCamera,
+                        selectedRearCaptureKind: _debug.rearCaptureKind,
+                        activeCapturePass: _sequentialPass,
+                        expressionTitle: coach.title,
+                        expressionSubtitle: coach.subtitle,
+                        expressionCountdown: coach.countdown,
+                        clipProgress: smileRecordPhase
+                            ? exprState.recordingProgress
+                            : null,
+                        // Hide 4-pose dots during support (only 2 sides) and smile.
+                        hidePoseProgress: exprActive ||
+                            (_expressionManifestPath != null &&
+                                captureState.status == CaptureStatus.idle),
+                        // Support + settle use the outline ring; smile record does not.
+                        suppressOutlineProgress: smileRecordPhase,
+                      );
                     },
-                    selectedActorMode: _debug.actorMode,
-                    selectedPractitionerFlow: _debug.practitionerFlow,
-                    selectedMeshMotion: _debug.meshMotion,
-                    selectedClinicianCamera: _debug.clinicianCamera,
-                    selectedRearCaptureKind: _debug.rearCaptureKind,
-                    activeCapturePass: _sequentialPass,
                   ),
                 ),
               ),
@@ -1384,25 +1994,35 @@ class _CapturePageState extends State<CapturePage> {
                 left: 28,
                 child: SafeArea(
                   child: BlocBuilder<CaptureBloc, CaptureState>(
-                    builder: (BuildContext context, CaptureState state) {
-                      if (state.status != CaptureStatus.capturing) {
-                        return const SizedBox.shrink();
-                      }
-                      return Semantics(
-                        button: true,
-                        label: 'Cancel scan',
-                        child: IconButton(
-                          tooltip: 'Cancel',
-                          style: _chromeIconButtonStyleLeading,
-                          icon: const Icon(
-                            Icons.close,
-                            color: Colors.white70,
-                            size: _chromeIconSize,
+                    builder: (BuildContext context, CaptureState captureState) =>
+                        BlocBuilder<ExpressionSequenceBloc,
+                            ExpressionSequenceState>(
+                      builder: (
+                        BuildContext context,
+                        ExpressionSequenceState exprState,
+                      ) {
+                        final bool capturing =
+                            captureState.status == CaptureStatus.capturing ||
+                            exprState.isActive;
+                        if (!capturing) {
+                          return const SizedBox.shrink();
+                        }
+                        return Semantics(
+                          button: true,
+                          label: 'Cancel scan',
+                          child: IconButton(
+                            tooltip: 'Cancel',
+                            style: _chromeIconButtonStyleLeading,
+                            icon: const Icon(
+                              Icons.close,
+                              color: Colors.white70,
+                              size: _chromeIconSize,
+                            ),
+                            onPressed: _cancelScan,
                           ),
-                          onPressed: _cancelScan,
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
                 ),
               ),
@@ -1515,6 +2135,9 @@ class _CapturePageState extends State<CapturePage> {
       return 'Saving…';
     }
     if (_didPersistCurrent && !_baking) {
+      if (_expressionManifestPath != null) {
+        return 'Expression clip saved';
+      }
       final CaptureSession? s = _lastSession;
       if (s != null && s.rearStills.isNotEmpty && s.hasBakeableMesh) {
         return 'Saved · mesh + rear · bake ready';

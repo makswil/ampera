@@ -70,7 +70,7 @@ void main() {
     expect(result.guidance, <PoseGuidance>[PoseGuidance.onTarget]);
   });
 
-  test('smile mode rejects on-target pose when smile score is low', () {
+  test('smile mode no longer hold-gates — pass-through (sequence owns smile)', () {
     final ExpressionAwarePoseValidator validator = ExpressionAwarePoseValidator(
       inner: _AlwaysOnTarget(),
       mode: ExpressionMode.smile,
@@ -86,68 +86,35 @@ void main() {
       ),
     );
 
-    expect(result.isOnTarget, isFalse);
-    expect(result.guidance, <PoseGuidance>[PoseGuidance.smileMore]);
-  });
-
-  test('smile mode accepts mouthSmile averages above the score floor', () {
-    final ExpressionAwarePoseValidator validator = ExpressionAwarePoseValidator(
-      inner: _AlwaysOnTarget(),
-      mode: ExpressionMode.smile,
-    );
-
-    final PoseValidation result = validator.validate(
-      pose: FacePose.frontal,
-      observation: frame(
-        blendshapes: const <FaceBlendshape, double>{
-          FaceBlendshape.mouthSmileLeft: ExpressionMode.smileMinScore,
-          FaceBlendshape.mouthSmileRight: ExpressionMode.smileMinScore,
-        },
-      ),
-    );
-
+    expect(ExpressionMode.smile.requiresExpressionGate, isFalse);
     expect(result.isOnTarget, isTrue);
     expect(result.guidance, <PoseGuidance>[PoseGuidance.onTarget]);
   });
 
-  test('smile mode accepts cheekSquint when mouthSmile is absent', () {
-    final ExpressionAwarePoseValidator validator = ExpressionAwarePoseValidator(
-      inner: _AlwaysOnTarget(),
-      mode: ExpressionMode.smile,
+  test('smileScore uses mouthSmile / cheekSquint / stretch', () {
+    expect(
+      ExpressionMode.smileScore(const <FaceBlendshape, double>{
+        FaceBlendshape.mouthSmileLeft: ExpressionMode.smileMinScore,
+        FaceBlendshape.mouthSmileRight: ExpressionMode.smileMinScore,
+      }),
+      greaterThanOrEqualTo(ExpressionMode.smileMinScore),
     );
-
-    final PoseValidation result = validator.validate(
-      pose: FacePose.frontal,
-      observation: frame(
-        blendshapes: const <FaceBlendshape, double>{
-          FaceBlendshape.cheekSquintLeft: 0.4,
-          FaceBlendshape.cheekSquintRight: 0.35,
-        },
-      ),
+    expect(
+      ExpressionMode.smileScore(const <FaceBlendshape, double>{
+        FaceBlendshape.cheekSquintLeft: 0.4,
+        FaceBlendshape.cheekSquintRight: 0.35,
+      }),
+      greaterThan(0.3),
     );
-
-    expect(result.isOnTarget, isTrue);
+    expect(
+      ExpressionMode.smileScore(const <FaceBlendshape, double>{
+        FaceBlendshape.mouthSmileLeft: 0.5,
+      }),
+      greaterThan(0.4),
+    );
   });
 
-  test('smile mode accepts a strong one-sided mouthSmile', () {
-    final ExpressionAwarePoseValidator validator = ExpressionAwarePoseValidator(
-      inner: _AlwaysOnTarget(),
-      mode: ExpressionMode.smile,
-    );
-
-    final PoseValidation result = validator.validate(
-      pose: FacePose.frontal,
-      observation: frame(
-        blendshapes: const <FaceBlendshape, double>{
-          FaceBlendshape.mouthSmileLeft: 0.5,
-        },
-      ),
-    );
-
-    expect(result.isOnTarget, isTrue);
-  });
-
-  test('pose guidance wins over missing smile', () {
+  test('pose guidance from inner still wins', () {
     final ExpressionAwarePoseValidator validator = ExpressionAwarePoseValidator(
       inner: _AlwaysOffTarget(),
       mode: ExpressionMode.smile,

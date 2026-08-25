@@ -20,7 +20,9 @@ class DebugSettings extends ChangeNotifier {
     bool? bakeNormalMap,
     double? targetDistanceMeters,
     bool? mlWb,
+    bool? mlWbExpression,
     bool? mlWbMatchFrontal,
+    bool? forceFirstLaunch,
     AppRole? appRole,
     CaptureActorMode? actorMode,
     PractitionerFlow? practitionerFlow,
@@ -44,7 +46,9 @@ class DebugSettings extends ChangeNotifier {
              PoseTolerance.kMaxTargetDistanceMeters,
            ),
        _mlWb = mlWb ?? true,
+       _mlWbExpression = mlWbExpression ?? false,
        _mlWbMatchFrontal = mlWbMatchFrontal ?? false,
+       _forceFirstLaunch = forceFirstLaunch ?? true,
        _appRole = appRole ?? AppRole.user,
        _actorMode = actorMode ??
            (appRole ?? AppRole.user).lockedActorMode ??
@@ -69,7 +73,11 @@ class DebugSettings extends ChangeNotifier {
   bool _bakeNormalMap;
   double _targetDistanceMeters;
   bool _mlWb;
+  bool _mlWbExpression;
   bool _mlWbMatchFrontal;
+  bool _forceFirstLaunch;
+  bool _howToShownNeutralThisLaunch = false;
+  bool _howToShownSmileThisLaunch = false;
   AppRole _appRole;
   CaptureActorMode _actorMode;
   PractitionerFlow _practitionerFlow;
@@ -95,7 +103,8 @@ class DebugSettings extends ChangeNotifier {
 
   /// After the first pose photo (front hi-res or rear still/video) settles
   /// AE/AWB, lock ISO/shutter/WB gains and reuse for later poses in that
-  /// camera session. Default on. New scan / camera switch clears the lock.
+  /// camera session. Default on. Does **not** apply to the frontal expression clip
+  /// (ARKit video frames). New scan / camera switch clears the lock.
   bool get lockAeAwb => _lockAeAwb;
 
   /// Whether the lower/under face (chin, jaw underside) is sourced from the
@@ -125,14 +134,50 @@ class DebugSettings extends ChangeNotifier {
   /// more face pixels in the still → sharper bake. Live: no rebuild needed.
   double get targetDistanceMeters => _targetDistanceMeters;
 
-  /// On-device ml-wb CoreML white-balance on pose stills before bake. Default
-  /// on. Generate again to apply.
+  /// On-device ml-wb CoreML white-balance before **4-pose** Generate.
+  /// Default on. Expression clip uses [mlWbExpression] instead.
   bool get mlWb => _mlWb;
 
-  /// Only when [mlWb] is on: `true` = all poses → frontal still's estimated
-  /// Kelvin; `false` (default) = all poses → [CaptureDefaults.neutralKelvin].
+  /// On-device ml-wb before **expression-clip** Generate. Default off (55+ frames
+  /// is expensive — enable in Dev settings to A/B).
+  bool get mlWbExpression => _mlWbExpression;
+
+  /// Only when [mlWb] / [mlWbExpression] is on: `true` = all inputs → frontal
+  /// still's estimated Kelvin; `false` (default) = → [CaptureDefaults.neutralKelvin].
   /// Generate again to apply.
   bool get mlWbMatchFrontal => _mlWbMatchFrontal;
+
+  /// When true, the how-to shows once per app launch (again after
+  /// `flutter run`), ignoring the on-disk seen flag. Default on.
+  bool get forceFirstLaunch => _forceFirstLaunch;
+
+  /// True after the 3D-model how-to was shown or dismissed this process.
+  bool get howToShownThisLaunch =>
+      howToShownThisLaunchFor(smile: false);
+
+  /// Whether this process already showed the how-to for [smile] vs 3D model.
+  bool howToShownThisLaunchFor({required bool smile}) =>
+      smile ? _howToShownSmileThisLaunch : _howToShownNeutralThisLaunch;
+
+  /// Marks the 3D-model how-to as consumed until the next process start.
+  void markHowToShownThisLaunch() {
+    markHowToShownThisLaunchFor(smile: false);
+  }
+
+  /// Marks the how-to for [smile] vs 3D model as consumed this process.
+  void markHowToShownThisLaunchFor({required bool smile}) {
+    if (smile) {
+      if (!_howToShownSmileThisLaunch) {
+        _howToShownSmileThisLaunch = true;
+        notifyListeners();
+      }
+      return;
+    }
+    if (!_howToShownNeutralThisLaunch) {
+      _howToShownNeutralThisLaunch = true;
+      notifyListeners();
+    }
+  }
 
   /// Product UI role (User / Clinician / Dev) — gates settings chrome.
   AppRole get appRole => _appRole;
@@ -249,9 +294,23 @@ class DebugSettings extends ChangeNotifier {
     }
   }
 
+  set mlWbExpression(bool value) {
+    if (value != _mlWbExpression) {
+      _mlWbExpression = value;
+      notifyListeners();
+    }
+  }
+
   set mlWbMatchFrontal(bool value) {
     if (value != _mlWbMatchFrontal) {
       _mlWbMatchFrontal = value;
+      notifyListeners();
+    }
+  }
+
+  set forceFirstLaunch(bool value) {
+    if (value != _forceFirstLaunch) {
+      _forceFirstLaunch = value;
       notifyListeners();
     }
   }

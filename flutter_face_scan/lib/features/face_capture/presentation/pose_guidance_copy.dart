@@ -26,8 +26,8 @@ abstract final class PoseGuidanceCopy {
         PoseGuidance.lookDown => 'Move up',
         PoseGuidance.levelHead => 'Level the iPad',
         PoseGuidance.smileMore => expressionScore.isNaN
-            ? 'Ask to smile more'
-            : 'Ask to smile more (${expressionScore.toStringAsFixed(2)})',
+            ? 'Ask for more expression'
+            : 'Ask for more expression (${expressionScore.toStringAsFixed(2)})',
         PoseGuidance.holdSteady => 'Hold steady…',
         PoseGuidance.onTarget => 'Perfect — hold still',
       };
@@ -43,8 +43,8 @@ abstract final class PoseGuidanceCopy {
       PoseGuidance.lookDown => 'Lower your chin',
       PoseGuidance.levelHead => 'Keep your head level',
       PoseGuidance.smileMore => expressionScore.isNaN
-          ? 'Smile a bit more'
-          : 'Smile a bit more (${expressionScore.toStringAsFixed(2)})',
+          ? 'A bit more expression'
+          : 'A bit more expression (${expressionScore.toStringAsFixed(2)})',
       PoseGuidance.holdSteady => 'Hold steady…',
       PoseGuidance.onTarget => 'Perfect — hold still',
     };
@@ -53,34 +53,21 @@ abstract final class PoseGuidanceCopy {
   /// What we want for this pose (title), without angle jargon.
   static String poseInstruction(
     FacePose pose, {
-    ExpressionMode expression = ExpressionMode.neutral,
     CaptureActorMode actorMode = CaptureActorMode.user,
   }) {
     if (actorMode == CaptureActorMode.practitioner) {
-      final String base = switch (pose) {
+      return switch (pose) {
         FacePose.frontal => 'Front of the face',
         FacePose.left40 => 'Right side of the face',
         FacePose.right40 => 'Left side of the face',
         FacePose.up => 'Under the chin',
       };
-      if (expression == ExpressionMode.smile) {
-        return '$base · keep smile';
-      }
-      return base;
-    }
-    if (expression == ExpressionMode.smile) {
-      return switch (pose) {
-        FacePose.frontal => 'Look straight and smile',
-        FacePose.left40 => 'Turn left — keep smiling',
-        FacePose.right40 => 'Turn right — keep smiling',
-        FacePose.up => 'Lift your chin — keep smiling',
-      };
     }
     return switch (pose) {
       FacePose.frontal => 'Look straight at the camera',
-      FacePose.left40 => 'Slowly turn left',
-      FacePose.right40 => 'Slowly turn right',
-      FacePose.up => 'Tilt your head back — lift your chin',
+      FacePose.left40 => 'Turn left',
+      FacePose.right40 => 'Turn right',
+      FacePose.up => 'Lift your chin',
     };
   }
 
@@ -98,7 +85,7 @@ abstract final class PoseGuidanceCopy {
     if (actorMode != CaptureActorMode.practitioner) {
       return switch (expression) {
         ExpressionMode.neutral => '4 angles of your face',
-        ExpressionMode.smile => '4 angles while you smile',
+        ExpressionMode.smile => 'Expression clip · frontal',
       };
     }
 

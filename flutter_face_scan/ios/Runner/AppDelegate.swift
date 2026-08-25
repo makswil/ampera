@@ -71,7 +71,10 @@ enum FaceTrackingPlugin {
         let args = call.arguments as? [String: Any]
         let hiRes = args?["hiRes"] as? Bool ?? false
         let lockAeAwb = args?["lockAeAwb"] as? Bool ?? true
-        if hiRes {
+        let currentFrameOnly = args?["currentFrameOnly"] as? Bool ?? false
+        if currentFrameOnly {
+          manager.captureStillFromCurrentFrame(result: result)
+        } else if hiRes {
           manager.captureHiResStill(lockAeAwb: lockAeAwb, result: result)
         } else {
           manager.captureStill(result: result)
@@ -116,6 +119,27 @@ enum FaceTrackingPlugin {
         let indices = (args?["axisIndices"] as? [NSNumber])?.map { $0.intValue } ?? []
         manager.configureOverlay(showMesh: show, axisIndices: indices)
         result(nil)
+      case "startExpressionBuffer":
+        let path = (call.arguments as? [String: Any])?["directoryPath"] as? String ?? ""
+        manager.startExpressionBuffer(directoryPath: path, result: result)
+      case "markExpressionStart":
+        let micros = (call.arguments as? [String: Any])?["startMicros"] as? NSNumber
+        manager.markExpressionStart(startMicros: micros?.int64Value ?? 0)
+        result(nil)
+      case "finalizeExpressionSequence":
+        let micros = (call.arguments as? [String: Any])?["endMicros"] as? NSNumber
+        manager.finalizeExpressionSequence(
+          endMicros: micros?.int64Value ?? 0,
+          result: result
+        )
+      case "cancelExpressionBuffer":
+        manager.cancelExpressionBuffer()
+        result(nil)
+      case "settleAndLockExpressionAeAwb":
+        // Settle TrueDepth AE/AWB then lock for support stills + smile clip.
+        manager.settleAndLockExpressionAeAwb(result: result)
+      case "unlockExpressionAeAwb":
+        manager.unlockExpressionAeAwb(result: result)
       case "openAppSettings":
         DispatchQueue.main.async {
           guard let url = URL(string: UIApplication.openSettingsURLString) else {
@@ -142,7 +166,7 @@ enum FaceTrackingPlugin {
       withId: "flutter_face_scan/face_preview"
     )
     registrar.register(
-      ObjModelPreviewFactory(),
+      ObjModelPreviewFactory(messenger: messenger),
       withId: "flutter_face_scan/obj_model_preview"
     )
 
@@ -240,6 +264,18 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
 
   /// Fires once when the first ARFrame arrives after resume (or on timeout).
   private var onPreviewLive: (() -> Void)?
+
+  // MARK: - Expression sequence buffer (JPEG + verts from the same ARFrame)
+
+  private var expressionBuffering = false
+  private var expressionDir: URL?
+  private var expressionStartMicros: Int64?
+  private var expressionLastSampleAt: CFTimeInterval = 0
+  private var expressionFrameIndex = 0
+  private var expressionFrames: [[String: Any]] = []
+  private var expressionTopology: [String: Any]?
+  private let expressionSampleInterval: CFTimeInterval = 1.0 / 20.0
+  private let expressionIoQueue = DispatchQueue(label: "flutter_face_scan.expression")
 
   private override init() {
     sceneView = ARSCNView(frame: .zero)
@@ -339,6 +375,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   func stop() {
     lockedLook = nil
     onPreviewLive = nil
+    cancelExpressionBuffer()
     sceneView.session.pause()
     isRunning = false
     sentTopology = false
@@ -368,6 +405,18 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       }
     }
     return best
+  }
+
+  /// Live ARKit video frame — no still capture, so the preview does not hitch.
+  func captureStillFromCurrentFrame(result: @escaping FlutterResult) {
+    let deliver: () -> Void = { [weak self] in
+      result(self?.stillDict(from: self?.sceneView.session.currentFrame))
+    }
+    if Thread.isMainThread {
+      deliver()
+    } else {
+      DispatchQueue.main.async(execute: deliver)
+    }
   }
 
   /// Async so it can grab a HI-RES still via `captureHighResolutionFrame` (from
@@ -782,6 +831,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
     if let faceAnchor = anchor as? ARFaceAnchor {
       applyOverlay(to: node, faceAnchor: faceAnchor)
+      maybeSampleExpressionFrame(faceAnchor: faceAnchor)
     }
     emit(anchor)
   }
@@ -824,6 +874,382 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       guard index >= 0, index < vertices.count, i < axisNodes.count else { continue }
       let v = vertices[index]
       axisNodes[i].simdPosition = simd_float3(v.x, v.y, v.z)
+    }
+  }
+
+  // MARK: Expression sequence capture
+
+  func startExpressionBuffer(directoryPath: String, result: @escaping FlutterResult) {
+    let root = URL(fileURLWithPath: directoryPath, isDirectory: true)
+    let dir = root.appendingPathComponent("expression", isDirectory: true)
+    let frames = dir.appendingPathComponent("frames", isDirectory: true)
+    do {
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      try FileManager.default.createDirectory(at: frames, withIntermediateDirectories: true)
+    } catch {
+      result(FlutterError(
+        code: "expression_dir",
+        message: "Could not create expression folder: \(error.localizedDescription)",
+        details: nil
+      ))
+      return
+    }
+    expressionDir = dir
+    expressionBuffering = true
+    expressionStartMicros = nil
+    expressionLastSampleAt = 0
+    expressionFrameIndex = 0
+    expressionFrames = []
+    expressionTopology = nil
+    result(nil)
+  }
+
+  func markExpressionStart(startMicros: Int64) {
+    // Prefer native clock. Dart wall-clock micros can disagree enough that the
+    // trim window drops every frame → empty sequence.json / failed Generate.
+    let lookback: Int64 = 1_000_000
+    expressionIoQueue.sync {
+      let nativeNow = Int64(Date().timeIntervalSince1970 * 1_000_000)
+      if let last = self.expressionFrames.last {
+        let lastT = (last["timestampMicros"] as? NSNumber)?.int64Value
+          ?? (last["timestampMicros"] as? Int64)
+          ?? nativeNow
+        self.expressionStartMicros = max(0, lastT - lookback)
+      } else if startMicros > 0 {
+        self.expressionStartMicros = startMicros
+      } else {
+        self.expressionStartMicros = max(0, nativeNow - lookback)
+      }
+    }
+  }
+
+  func cancelExpressionBuffer() {
+    expressionBuffering = false
+    expressionStartMicros = nil
+    expressionIoQueue.sync {
+      self.expressionFrames = []
+      self.expressionTopology = nil
+    }
+    if let dir = expressionDir {
+      let sequence = dir.appendingPathComponent("sequence.json")
+      // Never wipe a finalized clip (race with in-flight finalize / Dart teardown).
+      if !FileManager.default.fileExists(atPath: sequence.path) {
+        try? FileManager.default.removeItem(at: dir)
+      }
+    }
+    expressionDir = nil
+    expressionFrameIndex = 0
+  }
+
+  /// Settle front TrueDepth AE/AWB (same sensor ARKit uses) then lock for the
+  /// whole smile flow: support stills + clip frames stay colour-matched.
+  ///
+  /// Must not `startRunning` a second AVCapture session — that steals TrueDepth
+  /// from ARKit and freezes the first (frontal) pose as a still.
+  func settleAndLockExpressionAeAwb(result: @escaping FlutterResult) {
+    photoQueue.async { [weak self] in
+      guard let self else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      let device = self.photoDevice
+        ?? AVCaptureDevice.default(
+          .builtInTrueDepthCamera,
+          for: .video,
+          position: .front
+        )
+      guard let device else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      self.photoDevice = device
+      self.lockedLook = nil
+      // aeSettle already held ~800ms on-target — snapshot and lock in place.
+      let look = LockedCameraLook(
+        iso: device.iso,
+        duration: device.exposureDuration,
+        gains: device.deviceWhiteBalanceGains
+      )
+      self.lockedLook = look
+      self.applyLockedLook(look, on: device)
+      DispatchQueue.main.async { result(nil) }
+    }
+  }
+
+  func unlockExpressionAeAwb(result: @escaping FlutterResult) {
+    photoQueue.async { [weak self] in
+      guard let self else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      self.lockedLook = nil
+      if let device = AVCaptureDevice.default(
+        .builtInTrueDepthCamera,
+        for: .video,
+        position: .front
+      ) ?? self.photoDevice {
+        do {
+          try device.lockForConfiguration()
+          if device.isExposureModeSupported(.continuousAutoExposure) {
+            device.exposureMode = .continuousAutoExposure
+          }
+          if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+            device.whiteBalanceMode = .continuousAutoWhiteBalance
+          }
+          device.unlockForConfiguration()
+        } catch {
+          faceScanDebugLog("[face_scan] expression AE/AWB unlock failed: \(error)")
+        }
+      }
+      DispatchQueue.main.async { result(nil) }
+    }
+  }
+
+  func finalizeExpressionSequence(endMicros: Int64, result: @escaping FlutterResult) {
+    expressionBuffering = false
+    guard let dir = expressionDir else {
+      result(FlutterError(
+        code: "expression_none",
+        message: "No expression buffer active",
+        details: nil
+      ))
+      return
+    }
+    // Capture trim window, then drop ownership immediately so a concurrent
+    // cancelExpressionBuffer cannot delete `dir` while we write sequence.json.
+    let startMicros = expressionStartMicros ?? 0
+    expressionDir = nil
+    expressionStartMicros = nil
+    let nativeEnd = Int64(Date().timeIntervalSince1970 * 1_000_000)
+    // Ignore Dart endMicros for the same clock-skew reason as start.
+    let endCut = nativeEnd
+    expressionIoQueue.async { [weak self] in
+      guard let self else {
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      var kept: [[String: Any]] = []
+      for meta in self.expressionFrames {
+        let t = (meta["timestampMicros"] as? NSNumber)?.int64Value
+          ?? (meta["timestampMicros"] as? Int64)
+          ?? 0
+        if startMicros > 0 && t < startMicros { continue }
+        if t > endCut { continue }
+        kept.append(meta)
+      }
+      // Never ship an empty clip if we captured anything — clock trim failed.
+      if kept.isEmpty {
+        kept = self.expressionFrames
+      }
+
+      let keptNames = Set(kept.compactMap { $0["jpg"] as? String })
+      // Drop trimmed frames from expression/ (legacy flat) and expression/frames/.
+      func purgeUnusedFrames(in folder: URL, relativePrefix: String) {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+          at: folder, includingPropertiesForKeys: nil
+        ) else { return }
+        for url in files {
+          let name = url.lastPathComponent
+          guard name.hasSuffix(".jpg") || name.hasSuffix(".verts") || name.hasSuffix(".bin")
+          else { continue }
+          let stem = url.deletingPathExtension().lastPathComponent
+          let jpgRel = relativePrefix.isEmpty
+            ? "\(stem).jpg"
+            : "\(relativePrefix)/\(stem).jpg"
+          if !keptNames.contains(jpgRel) && name != "sequence.json" {
+            try? FileManager.default.removeItem(at: url)
+          }
+        }
+      }
+      purgeUnusedFrames(in: dir, relativePrefix: "")
+      purgeUnusedFrames(
+        in: dir.appendingPathComponent("frames", isDirectory: true),
+        relativePrefix: "frames"
+      )
+
+      // JSONSerialization needs NSNumber / NSArray — plain Int64 can fail.
+      let jsonFrames: [[String: Any]] = kept.map { meta in
+        var out = meta
+        if let t = out["timestampMicros"] as? Int64 {
+          out["timestampMicros"] = NSNumber(value: t)
+        }
+        if let i = out["index"] as? Int {
+          out["index"] = NSNumber(value: i)
+        }
+        return out
+      }
+
+      var manifest: [String: Any] = [
+        "schemaVersion": 1,
+        "frameCount": kept.count,
+        "targetFps": 20,
+        "startMicros": NSNumber(value: startMicros),
+        "endMicros": NSNumber(value: endCut),
+        "frames": jsonFrames,
+      ]
+      if let topo = self.expressionTopology {
+        if let indices = topo["triangleIndices"] as? [Int] {
+          manifest["triangleIndices"] = indices.map { NSNumber(value: $0) }
+        } else {
+          manifest["triangleIndices"] = topo["triangleIndices"]
+        }
+        manifest["textureCoordinates"] = topo["textureCoordinates"]
+      }
+      let manifestURL = dir.appendingPathComponent("sequence.json")
+      do {
+        guard JSONSerialization.isValidJSONObject(manifest) else {
+          throw NSError(
+            domain: "flutter_face_scan",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "sequence manifest is not valid JSON"]
+          )
+        }
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted])
+        try data.write(to: manifestURL, options: .atomic)
+      } catch {
+        DispatchQueue.main.async {
+          result(FlutterError(
+            code: "expression_manifest",
+            message: error.localizedDescription,
+            details: nil
+          ))
+        }
+        return
+      }
+
+      let sessionDir = dir.deletingLastPathComponent().path
+      faceScanDebugLog(
+        String(
+          format: "[face_scan] expression finalize — kept %d / %d frames → %@",
+          kept.count,
+          self.expressionFrames.count,
+          manifestURL.path
+        )
+      )
+      DispatchQueue.main.async {
+        self.expressionIoQueue.async {
+          self.expressionFrames = []
+          self.expressionTopology = nil
+        }
+        result([
+          "directoryPath": sessionDir,
+          "frameCount": kept.count,
+          "manifestPath": manifestURL.path,
+        ] as [String: Any])
+      }
+    }
+  }
+
+  private func maybeSampleExpressionFrame(faceAnchor: ARFaceAnchor) {
+    guard expressionBuffering,
+          faceAnchor.isTracked,
+          let dir = expressionDir,
+          let frame = sceneView.session.currentFrame
+    else { return }
+
+    let now = CACurrentMediaTime()
+    if expressionLastSampleAt > 0,
+       now - expressionLastSampleAt < expressionSampleInterval {
+      return
+    }
+    expressionLastSampleAt = now
+
+    let timestampMicros = Int64(Date().timeIntervalSince1970 * 1_000_000)
+    // Once start is locked, stop if past hard-cap window (Dart also stops).
+    if let start = expressionStartMicros,
+       timestampMicros - start > 10_500_000 {
+      return
+    }
+
+    let index = expressionFrameIndex
+    expressionFrameIndex += 1
+    let stem = String(format: "frame_%04d", index)
+    // Relative to expression/ so sequence.json + baker resolve paths.
+    let jpgName = "frames/\(stem).jpg"
+    let vertsName = "frames/\(stem).verts"
+    let framesDir = dir.appendingPathComponent("frames", isDirectory: true)
+    let jpgURL = framesDir.appendingPathComponent("\(stem).jpg")
+    let vertsURL = framesDir.appendingPathComponent("\(stem).verts")
+
+    let geometry = faceAnchor.geometry
+    var vertices = [Float]()
+    vertices.reserveCapacity(geometry.vertices.count * 3)
+    for vertex in geometry.vertices {
+      vertices.append(vertex.x)
+      vertices.append(vertex.y)
+      vertices.append(vertex.z)
+    }
+
+    let smileL = faceAnchor.blendShapes[.mouthSmileLeft]?.doubleValue ?? 0
+    let smileR = faceAnchor.blendShapes[.mouthSmileRight]?.doubleValue ?? 0
+    let stretchL = faceAnchor.blendShapes[.mouthStretchLeft]?.doubleValue ?? 0
+    let stretchR = faceAnchor.blendShapes[.mouthStretchRight]?.doubleValue ?? 0
+    let squintL = faceAnchor.blendShapes[.cheekSquintLeft]?.doubleValue ?? 0
+    let squintR = faceAnchor.blendShapes[.cheekSquintRight]?.doubleValue ?? 0
+    let smileScore = max(
+      max((smileL + smileR) / 2, max(smileL, smileR)),
+      max((squintL + squintR) / 2, (stretchL + stretchR) / 2)
+    )
+
+    // JPEG + matrices from the same ARFrame (matches stillDict).
+    let ciImage = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.right)
+    guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent),
+          let jpeg = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.75)
+    else { return }
+
+    let width = cgImage.width
+    let height = cgImage.height
+    let viewport = CGSize(width: width, height: height)
+    let view = frame.camera.viewMatrix(for: .portrait)
+    let projection = frame.camera.projectionMatrix(
+      for: .portrait,
+      viewportSize: viewport,
+      zNear: 0.001,
+      zFar: 1000
+    )
+
+    var topologyPayload: [String: Any]?
+    if expressionTopology == nil {
+      let indices = geometry.triangleIndices.map { Int($0) }
+      var uvs = [Float]()
+      uvs.reserveCapacity(geometry.textureCoordinates.count * 2)
+      for uv in geometry.textureCoordinates {
+        uvs.append(uv.x)
+        uvs.append(uv.y)
+      }
+      topologyPayload = [
+        "triangleIndices": indices.map { NSNumber(value: $0) },
+        "textureCoordinates": uvs.map { Double($0) },
+      ]
+    }
+
+    let meta: [String: Any] = [
+      "index": NSNumber(value: index),
+      "timestampMicros": NSNumber(value: timestampMicros),
+      "smileScore": smileScore,
+      "jpg": jpgName,
+      "verts": vertsName,
+      "width": NSNumber(value: width),
+      "height": NSNumber(value: height),
+      "viewMatrix": flatten(view).map { Double($0) },
+      "projectionMatrix": flatten(projection).map { Double($0) },
+      "faceTransform": flatten(faceAnchor.transform).map { Double($0) },
+    ]
+    let vertsData = vertices.withUnsafeBufferPointer { Data(buffer: $0) }
+    // All frame bookkeeping stays on expressionIoQueue so finalize sees a
+    // consistent list after prior writes complete.
+    expressionIoQueue.async { [weak self] in
+      guard let self else { return }
+      do {
+        try jpeg.write(to: jpgURL, options: .atomic)
+        try vertsData.write(to: vertsURL, options: .atomic)
+        if self.expressionTopology == nil, let topologyPayload {
+          self.expressionTopology = topologyPayload
+        }
+        self.expressionFrames.append(meta)
+      } catch {
+        faceScanDebugLog("[face_scan] expression frame write failed: \(error)")
+      }
     }
   }
 
@@ -1104,8 +1530,9 @@ private func faceScanPresentPreview(_ path: String, done: @escaping () -> Void) 
   }
 }
 
-/// Builds a textured SceneKit scene for a bake OBJ (albedo + optional normal).
-private func faceScanBuildObjScene(objURL: URL) -> (scene: SCNScene, camera: SCNNode) {
+/// Loads a bake OBJ as a mesh node (albedo + optional normal). No camera —
+/// the viewer keeps one camera so clip playback cannot flash the default view.
+private func faceScanLoadObjMesh(objURL: URL) -> SCNNode {
   // ModelIO loads mesh + UVs, but often leaves map_Kd unresolved → white face.
   // Apply sibling albedo / normal PNGs onto SCNMaterials explicitly.
   let asset = MDLAsset(url: objURL)
@@ -1113,47 +1540,23 @@ private func faceScanBuildObjScene(objURL: URL) -> (scene: SCNScene, camera: SCN
   let scene = SCNScene(mdlAsset: asset)
   faceScanApplyBakeTextures(to: scene, objURL: objURL)
 
-  let (minVec, maxVec) = scene.rootNode.boundingBox
-  let center = SCNVector3(
-    (minVec.x + maxVec.x) * 0.5,
-    (minVec.y + maxVec.y) * 0.5,
-    (minVec.z + maxVec.z) * 0.5
-  )
-  let extent = SCNVector3(
-    maxVec.x - minVec.x,
-    maxVec.y - minVec.y,
-    maxVec.z - minVec.z
-  )
-  let radius = max(extent.x, max(extent.y, extent.z))
-  let cameraNode = SCNNode()
-  cameraNode.camera = SCNCamera()
-  cameraNode.camera?.zNear = 0.001
-  cameraNode.camera?.zFar = max(10, Double(radius) * 20)
-  cameraNode.position = SCNVector3(
-    center.x,
-    center.y,
-    center.z + max(radius * 2.2, 0.35)
-  )
-  scene.rootNode.addChildNode(cameraNode)
-
-  let light = SCNNode()
-  light.light = SCNLight()
-  light.light?.type = .omni
-  light.light?.intensity = 800
-  light.position = SCNVector3(center.x, center.y + radius, center.z + radius)
-  scene.rootNode.addChildNode(light)
-
-  let ambient = SCNNode()
-  ambient.light = SCNLight()
-  ambient.light?.type = .ambient
-  ambient.light?.intensity = 400
-  scene.rootNode.addChildNode(ambient)
-
-  return (scene, cameraNode)
+  let wrapper = SCNNode()
+  for child in scene.rootNode.childNodes {
+    child.removeFromParentNode()
+    wrapper.addChildNode(child)
+  }
+  return wrapper
 }
 
 /// Embedded SceneKit OBJ viewer for Flutter `UiKitView`.
 final class ObjModelPreviewFactory: NSObject, FlutterPlatformViewFactory {
+  private let messenger: FlutterBinaryMessenger
+
+  init(messenger: FlutterBinaryMessenger) {
+    self.messenger = messenger
+    super.init()
+  }
+
   func create(
     withFrame frame: CGRect,
     viewIdentifier viewId: Int64,
@@ -1164,6 +1567,8 @@ final class ObjModelPreviewFactory: NSObject, FlutterPlatformViewFactory {
     let argb = map?["backgroundArgb"] as? NSNumber
     return ObjModelPreviewView(
       frame: frame,
+      viewId: viewId,
+      messenger: messenger,
       objPath: path,
       backgroundArgb: argb?.uint32Value
     )
@@ -1176,33 +1581,194 @@ final class ObjModelPreviewFactory: NSObject, FlutterPlatformViewFactory {
 
 final class ObjModelPreviewView: NSObject, FlutterPlatformView {
   private let scnView: SCNView
+  private let channel: FlutterMethodChannel
+  /// Stable scene: swapping per-frame SCNScenes reset SceneKit's camera
+  /// controller and flashed the default frontal view during clip playback.
+  private let contentRoot = SCNNode()
+  private let cameraNode = SCNNode()
+  /// Preloaded meshes for expression-sequence play (path → node).
+  private var meshCache: [String: SCNNode] = [:]
+  private var currentMesh: SCNNode?
+  private var didFitCamera = false
+  /// Drops stale async loads when seeking faster than ModelIO (uncached only).
+  private var loadGeneration = 0
 
-  init(frame: CGRect, objPath: String, backgroundArgb: UInt32?) {
+  init(
+    frame: CGRect,
+    viewId: Int64,
+    messenger: FlutterBinaryMessenger,
+    objPath: String,
+    backgroundArgb: UInt32?
+  ) {
     scnView = SCNView(frame: frame)
+    channel = FlutterMethodChannel(
+      name: "flutter_face_scan/obj_model_preview_\(viewId)",
+      binaryMessenger: messenger
+    )
     super.init()
     scnView.backgroundColor = Self.uiColor(argb: backgroundArgb) ?? .black
     scnView.allowsCameraControl = true
-    scnView.autoenablesDefaultLighting = true
+    // Bake albedo already includes photo lighting; default lights + Lambert
+    // drew hard facets on mouth/eye fill tris.
+    scnView.autoenablesDefaultLighting = false
     scnView.antialiasingMode = .multisampling4X
 
-    guard faceScanIsShareablePath(objPath),
-          FileManager.default.fileExists(atPath: objPath)
-    else {
-      return
-    }
-    let url = URL(fileURLWithPath: objPath)
-    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-      let built = faceScanBuildObjScene(objURL: url)
-      DispatchQueue.main.async {
-        guard let self else { return }
-        self.scnView.scene = built.scene
-        self.scnView.pointOfView = built.camera
+    let scene = SCNScene()
+    cameraNode.camera = SCNCamera()
+    cameraNode.camera?.zNear = 0.001
+    cameraNode.camera?.zFar = 10
+    cameraNode.position = SCNVector3(0, 0, 0.35)
+    scene.rootNode.addChildNode(cameraNode)
+    scene.rootNode.addChildNode(contentRoot)
+    // Soft fill only — albedo already has photo lighting; strong omni + Lambert
+    // faceted the mouth-cap tris. Constant materials ignore lights; keep ambient
+    // in case a material falls back.
+    let ambient = SCNNode()
+    ambient.light = SCNLight()
+    ambient.light?.type = .ambient
+    ambient.light?.intensity = 1000
+    scene.rootNode.addChildNode(ambient)
+
+    scnView.scene = scene
+    scnView.pointOfView = cameraNode
+    scnView.defaultCameraController.automaticTarget = false
+    scnView.defaultCameraController.target = SCNVector3Zero
+
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self else {
+        result(nil)
+        return
+      }
+      switch call.method {
+      case "preload":
+        let paths =
+          (call.arguments as? [String: Any])?["paths"] as? [String] ?? []
+        self.preload(paths: paths, result: result)
+      case "setPath":
+        let path =
+          (call.arguments as? [String: Any])?["path"] as? String ?? ""
+        self.setPath(path, result: result)
+      default:
+        result(FlutterMethodNotImplemented)
       }
     }
+
+    // First frame — result ignored (creation-time load).
+    setPath(objPath, result: { _ in })
   }
 
   func view() -> UIView {
     return scnView
+  }
+
+  private func preload(paths: [String], result: @escaping FlutterResult) {
+    // Resolve what's missing on the main thread (cache is main-owned).
+    // Keep caller order so the first frame can set the shared origin.
+    var missing: [String] = []
+    var seen = Set<String>()
+    for path in paths {
+      guard !seen.contains(path),
+            faceScanIsShareablePath(path),
+            meshCache[path] == nil,
+            FileManager.default.fileExists(atPath: path)
+      else { continue }
+      seen.insert(path)
+      missing.append(path)
+    }
+    if missing.isEmpty {
+      result(nil)
+      return
+    }
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      var built: [String: SCNNode] = [:]
+      for path in missing {
+        built[path] = faceScanLoadObjMesh(objURL: URL(fileURLWithPath: path))
+      }
+      DispatchQueue.main.async {
+        guard let self else {
+          result(nil)
+          return
+        }
+        for path in missing {
+          guard let node = built[path] else { continue }
+          self.meshCache[path] = node
+        }
+        result(nil)
+      }
+    }
+  }
+
+  private func setPath(
+    _ path: String,
+    result: @escaping FlutterResult
+  ) {
+    guard faceScanIsShareablePath(path),
+          FileManager.default.fileExists(atPath: path)
+    else {
+      result(nil)
+      return
+    }
+
+    if let cached = meshCache[path] {
+      show(cached)
+      result(nil)
+      return
+    }
+
+    loadGeneration += 1
+    let gen = loadGeneration
+    let url = URL(fileURLWithPath: path)
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let mesh = faceScanLoadObjMesh(objURL: url)
+      DispatchQueue.main.async {
+        guard let self else {
+          result(nil)
+          return
+        }
+        self.meshCache[path] = mesh
+        guard gen == self.loadGeneration else {
+          // Superseded by a newer seek target; still report done so Dart
+          // can advance to the latest pending path.
+          result(nil)
+          return
+        }
+        self.show(mesh)
+        result(nil)
+      }
+    }
+  }
+
+  private func show(_ mesh: SCNNode) {
+    if currentMesh === mesh {
+      return
+    }
+    currentMesh?.removeFromParentNode()
+    contentRoot.addChildNode(mesh)
+    currentMesh = mesh
+    fitCameraIfNeeded(for: mesh)
+  }
+
+  /// Place the camera once from the first mesh. Later clip frames share
+  /// face-local coordinates, so the user's orbit is never reset.
+  private func fitCameraIfNeeded(for mesh: SCNNode) {
+    guard !didFitCamera else { return }
+    let (minV, maxV) = mesh.boundingBox
+    let center = SCNVector3(
+      (minV.x + maxV.x) * 0.5,
+      (minV.y + maxV.y) * 0.5,
+      (minV.z + maxV.z) * 0.5
+    )
+    contentRoot.position = SCNVector3(-center.x, -center.y, -center.z)
+    let extent = SCNVector3(
+      maxV.x - minV.x,
+      maxV.y - minV.y,
+      maxV.z - minV.z
+    )
+    let radius = max(extent.x, max(extent.y, extent.z))
+    cameraNode.camera?.zFar = max(10, Double(radius) * 20)
+    cameraNode.position = SCNVector3(0, 0, max(radius * 2.2, 0.35))
+    scnView.defaultCameraController.target = SCNVector3Zero
+    didFitCamera = true
   }
 
   private static func uiColor(argb: UInt32?) -> UIColor? {
@@ -1269,7 +1835,8 @@ private func faceScanApplyBakeTextures(to scene: SCNScene, objURL: URL) {
   func apply(to node: SCNNode) {
     if let geometry = node.geometry {
       let material = SCNMaterial()
-      material.lightingModel = .lambert
+      // Constant = show bake albedo as-is (no Lambert shading on fill tris).
+      material.lightingModel = .constant
       material.isDoubleSided = true
       material.diffuse.contents = albedo
       material.diffuse.wrapS = .clamp

@@ -1,5 +1,4 @@
 import 'package:flutter_face_scan/features/face_capture/domain/entities/capture_actor_mode.dart';
-import 'package:flutter_face_scan/features/face_capture/domain/entities/expression_mode.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/face_pose.dart';
 import 'package:flutter_face_scan/features/face_capture/domain/entities/pose_guidance.dart';
 import 'package:flutter_face_scan/features/face_capture/presentation/pose_guidance_copy.dart';
@@ -35,10 +34,9 @@ void main() {
       expect(
         PoseGuidanceCopy.poseInstruction(
           FacePose.up,
-          expression: ExpressionMode.smile,
           actorMode: CaptureActorMode.practitioner,
         ),
-        'Under the chin · keep smile',
+        'Under the chin',
       );
     });
 
@@ -49,7 +47,7 @@ void main() {
       );
       expect(
         PoseGuidanceCopy.poseInstruction(FacePose.left40),
-        'Slowly turn left',
+        'Turn left',
       );
     });
   });

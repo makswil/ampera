@@ -3,23 +3,32 @@ import 'dart:math' as math;
 import 'face_blendshape.dart';
 import 'pose_guidance.dart';
 
-/// Facial expression the guided scan asks the user to hold.
+/// Capture-mode toggle next to Start (bottom-right).
 ///
-/// Reuses the same head-pose sequence as neutral; non-neutral modes add a
-/// blendshape gate on top of [GuidedPoseValidator].
+/// [neutral] runs the guided 4-pose mesh scan. [smile] runs the frontal
+/// expression-sequence capture (settle → countdown → onset → clip).
 enum ExpressionMode {
-  /// Relaxed face — no blendshape gate (default / legacy sessions).
-  neutral(label: 'Neutral'),
+  /// Guided multi-pose scan (frontal → left → right → chin-up).
+  neutral(label: 'Pose'),
 
-  /// Smile held for the whole pose sequence.
-  smile(label: 'Smile');
+  /// Frontal expression sequence (rest → any expression), not a hold-gate.
+  smile(label: 'Expression');
 
   const ExpressionMode({required this.label});
 
-  /// Short UI label for pickers and scan lists.
+  /// Short UI label for pickers (Pose / Expression).
   final String label;
 
-  /// Minimum smile *score* (see [smileScore]) to accept [smile].
+  /// Consumer-facing kind in scan lists and the model viewer.
+  String get productLabel => switch (this) {
+    ExpressionMode.neutral => '3D model',
+    ExpressionMode.smile => 'Expression clip',
+  };
+
+  /// Whether this mode runs the frontal expression-sequence flow.
+  bool get isExpressionSequence => this == ExpressionMode.smile;
+
+  /// Minimum smile *score* (see [smileScore]) for end-of-sequence / legacy gate.
   ///
   /// ARKit often omits near-zero coefficients from the frame map, and a strong
   /// smile frequently shows up more in cheek-squint / mouth-stretch than in
@@ -39,10 +48,10 @@ enum ExpressionMode {
     return ExpressionMode.neutral;
   }
 
-  /// Whether this mode adds a blendshape acceptance gate.
-  bool get requiresExpressionGate => this != ExpressionMode.neutral;
+  /// Legacy hold-gate flag — always false; smile is sequence mode now.
+  bool get requiresExpressionGate => false;
 
-  /// Next mode when the user cycles the picker (Neutral ↔ Smile for now).
+  /// Next mode when the user cycles the picker (Pose ↔ Expression for now).
   ExpressionMode get next => switch (this) {
     ExpressionMode.neutral => ExpressionMode.smile,
     ExpressionMode.smile => ExpressionMode.neutral,

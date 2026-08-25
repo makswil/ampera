@@ -13,6 +13,7 @@ class FaceGuideLayer extends StatefulWidget {
   const FaceGuideLayer({
     required this.targetDistanceMeters,
     required this.holdProgress,
+    this.holdComplete = false,
     this.guidance,
     this.active = false,
     super.key,
@@ -20,6 +21,11 @@ class FaceGuideLayer extends StatefulWidget {
 
   final double targetDistanceMeters;
   final double holdProgress;
+
+  /// Pose accepted: draw a full accent ring. Falling edge fades it to the
+  /// default outline (with the capture click).
+  final bool holdComplete;
+
   final PoseGuidance? guidance;
   final bool active;
 
@@ -44,8 +50,11 @@ class FaceGuideLayer extends StatefulWidget {
 }
 
 class _FaceGuideLayerState extends State<FaceGuideLayer>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final AnimationController _pulse;
+  late final AnimationController _completeFade;
+
+  static const Duration _completeFadeDuration = Duration(milliseconds: 280);
 
   @override
   void initState() {
@@ -54,6 +63,13 @@ class _FaceGuideLayerState extends State<FaceGuideLayer>
       vsync: this,
       duration: const Duration(milliseconds: 900),
     );
+    _completeFade = AnimationController(
+      vsync: this,
+      duration: _completeFadeDuration,
+    );
+    if (widget.holdComplete) {
+      _completeFade.value = 1;
+    }
     _syncPulse();
   }
 
@@ -63,6 +79,11 @@ class _FaceGuideLayerState extends State<FaceGuideLayer>
     if (oldWidget.guidance != widget.guidance ||
         oldWidget.active != widget.active) {
       _syncPulse();
+    }
+    if (widget.holdComplete && !oldWidget.holdComplete) {
+      _completeFade.value = 1;
+    } else if (!widget.holdComplete && oldWidget.holdComplete) {
+      unawaited(_completeFade.animateTo(0, curve: Curves.easeOut));
     }
   }
 
@@ -86,6 +107,7 @@ class _FaceGuideLayerState extends State<FaceGuideLayer>
   @override
   void dispose() {
     _pulse.dispose();
+    _completeFade.dispose();
     super.dispose();
   }
 
@@ -96,12 +118,17 @@ class _FaceGuideLayerState extends State<FaceGuideLayer>
     }
     final GuidanceVisual visual = visualFor(widget.guidance);
     return AnimatedBuilder(
-      animation: _pulse,
+      animation: Listenable.merge(<Listenable>[_pulse, _completeFade]),
       builder: (BuildContext context, Widget? _) {
+        final double fade = _completeFade.value;
+        final bool fullRing = widget.holdComplete || fade > 0;
         return CustomPaint(
           painter: _FaceGuidePainter(
             targetDistanceMeters: widget.targetDistanceMeters,
-            holdProgress: widget.holdProgress,
+            holdProgress: fullRing ? 1 : widget.holdProgress,
+            holdAccentOpacity: fullRing
+                ? (widget.holdComplete ? 1 : fade)
+                : 1,
             visual: visual,
             pulse: _pulse.value,
           ),
@@ -116,12 +143,14 @@ class _FaceGuidePainter extends CustomPainter {
   const _FaceGuidePainter({
     required this.targetDistanceMeters,
     required this.holdProgress,
+    required this.holdAccentOpacity,
     required this.visual,
     required this.pulse,
   });
 
   final double targetDistanceMeters;
   final double holdProgress;
+  final double holdAccentOpacity;
   final GuidanceVisual visual;
   final double pulse;
 
@@ -174,8 +203,13 @@ class _FaceGuidePainter extends CustomPainter {
         ..color = Colors.black.withValues(alpha: 0.78),
     );
 
-    if (holdProgress > 0) {
-      _drawHoldProgress(canvas, face, holdProgress.clamp(0.0, 1.0));
+    if (holdProgress > 0 && holdAccentOpacity > 0) {
+      _drawHoldProgress(
+        canvas,
+        face,
+        holdProgress.clamp(0.0, 1.0),
+        holdAccentOpacity.clamp(0.0, 1.0),
+      );
     }
   }
 
@@ -197,7 +231,12 @@ class _FaceGuidePainter extends CustomPainter {
       ..close();
   }
 
-  void _drawHoldProgress(Canvas canvas, Path face, double progress) {
+  void _drawHoldProgress(
+    Canvas canvas,
+    Path face,
+    double progress,
+    double opacity,
+  ) {
     for (final ui.PathMetric metric in face.computeMetrics()) {
       final Path arc = metric.extractPath(0, metric.length * progress);
       canvas.drawPath(
@@ -206,7 +245,7 @@ class _FaceGuidePainter extends CustomPainter {
           ..style = PaintingStyle.stroke
           ..strokeWidth = 3.5
           ..strokeCap = StrokeCap.round
-          ..color = ScanTheme.accent,
+          ..color = ScanTheme.accent.withValues(alpha: opacity),
       );
     }
   }
@@ -215,6 +254,7 @@ class _FaceGuidePainter extends CustomPainter {
   bool shouldRepaint(_FaceGuidePainter oldDelegate) =>
       oldDelegate.targetDistanceMeters != targetDistanceMeters ||
       oldDelegate.holdProgress != holdProgress ||
+      oldDelegate.holdAccentOpacity != holdAccentOpacity ||
       oldDelegate.visual != visual ||
       oldDelegate.pulse != pulse;
 }

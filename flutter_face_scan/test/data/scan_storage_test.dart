@@ -140,6 +140,23 @@ void main() {
     expect(await storage.listFiles('../session_a'), isEmpty);
   });
 
+  test('newestObj finds smile bake under expression/baked', () async {
+    await makeSession('session_smile', expression: 'smile');
+    await makeSession('session_plain');
+    final Directory baked = Directory(
+      '${tempDir.path}/face_scans/session_smile/expression/baked',
+    );
+    await baked.create(recursive: true);
+    await File('${baked.path}/frame_001.obj').writeAsString('obj1');
+    await File('${baked.path}/frame_000.obj').writeAsString('obj0');
+
+    final ScanStorage storage = ScanStorage(rootDirectory: tempDir);
+    final ScanFileEntry? obj = await storage.newestObj('session_smile');
+    expect(obj?.name, 'frame_000.obj');
+    expect(storage.expressionBakeDirectory('session_smile'), isNotNull);
+    expect(storage.expressionBakeDirectory('session_plain'), isNull);
+  });
+
   test('consumerTitle prefers displayName over folder id', () async {
     await makeSession('session_epoch_999');
     final ScanStorage storage = ScanStorage(rootDirectory: tempDir);

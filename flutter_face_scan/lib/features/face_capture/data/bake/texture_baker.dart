@@ -103,12 +103,18 @@ final class TextureBaker {
   /// highest-weight pose (maximally sharp, but visible seams where the winner
   /// switches — pair with colour matching). The FIRST pose is the fallback
   /// (frontal) when no pose has weight there. Pure.
+  ///
+  /// [solidFillFromFlatIndex]: flat triangle-list offset at which aperture-fill
+  /// tris begin (e.g. mouth caps). Those tris get a flat dark fill — no photo
+  /// projection into the cavity (avoids patchy grey / wrong lip colours).
   img.Image bakeViewDependent({
     required List<WeightedPose> poses,
     required List<double> uvs,
     required List<int> triangles,
     int textureSize = 2048,
     bool blend = true,
+    int? solidFillFromFlatIndex,
+    List<int> solidFillRgb = const <int>[12, 8, 8],
   }) {
     final img.Image out = img.Image(
       width: textureSize,
@@ -124,6 +130,13 @@ final class TextureBaker {
         Vector2(uvs[i] * textureSize, uvs[i + 1] * textureSize),
     ];
 
+    final int fillR =
+        solidFillRgb.isNotEmpty ? solidFillRgb[0].clamp(0, 255).toInt() : 12;
+    final int fillG =
+        solidFillRgb.length > 1 ? solidFillRgb[1].clamp(0, 255).toInt() : 8;
+    final int fillB =
+        solidFillRgb.length > 2 ? solidFillRgb[2].clamp(0, 255).toInt() : 8;
+
     for (int t = 0; t + 2 < triangles.length; t += 3) {
       final int a = triangles[t];
       final int b = triangles[t + 1];
@@ -131,11 +144,63 @@ final class TextureBaker {
       if (a >= uvPx.length || b >= uvPx.length || c >= uvPx.length) {
         continue;
       }
+      if (solidFillFromFlatIndex != null && t >= solidFillFromFlatIndex) {
+        _rasterizeSolid(
+          out,
+          uvPx[a],
+          uvPx[b],
+          uvPx[c],
+          textureSize,
+          fillR,
+          fillG,
+          fillB,
+        );
+        continue;
+      }
       _rasterizeViewDependent(
-          out, poses, uvPx[a], uvPx[b], uvPx[c], a, b, c, textureSize, blend);
+        out,
+        poses,
+        uvPx[a],
+        uvPx[b],
+        uvPx[c],
+        a,
+        b,
+        c,
+        textureSize,
+        blend,
+      );
     }
 
     return out;
+  }
+
+  void _rasterizeSolid(
+    img.Image out,
+    Vector2 uvA,
+    Vector2 uvB,
+    Vector2 uvC,
+    int size,
+    int r,
+    int g,
+    int b,
+  ) {
+    final int minX = math.max(0, _floor3(uvA.x, uvB.x, uvC.x));
+    final int maxX = math.min(size - 1, _ceil3(uvA.x, uvB.x, uvC.x));
+    final int minY = math.max(0, _floor3(uvA.y, uvB.y, uvC.y));
+    final int maxY = math.min(size - 1, _ceil3(uvA.y, uvB.y, uvC.y));
+    if (minX > maxX || minY > maxY) {
+      return;
+    }
+    for (int py = minY; py <= maxY; py++) {
+      for (int px = minX; px <= maxX; px++) {
+        final Vector2 p = Vector2(px + 0.5, py + 0.5);
+        final Vector3? bc = barycentric(p, uvA, uvB, uvC);
+        if (bc == null || bc.x < 0 || bc.y < 0 || bc.z < 0) {
+          continue;
+        }
+        out.setPixelRgba(px, py, r, g, b, 255);
+      }
+    }
   }
 
   void _rasterizeViewDependent(
@@ -230,11 +295,17 @@ final class TextureBaker {
           continue;
         }
 
-        // No pose covers this texel (all guarded off / grazing / off-image):
-        // fall back to the first (frontal) pose so we don't leave a hole.
-        final _Rgb? fallback = _sampleFace(poses.first.pose, bc, a, b, c);
-        if (fallback != null) {
-          out.setPixelRgba(px, py, fallback.r, fallback.g, fallback.b, 255);
+        // No pose covers this texel (all guarded off / grazing / off-image).
+        // Only fall back to frontal when it still has meaningful facing —
+        // otherwise we smear a stretched skin tone into occluded sides.
+        final double frontW = n > 0
+            ? (bc.x * wA[0] + bc.y * wB[0] + bc.z * wC[0])
+            : 0;
+        if (frontW > 0.05) {
+          final _Rgb? fallback = _sampleFace(poses.first.pose, bc, a, b, c);
+          if (fallback != null) {
+            out.setPixelRgba(px, py, fallback.r, fallback.g, fallback.b, 255);
+          }
         }
       }
     }

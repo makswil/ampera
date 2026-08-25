@@ -5,6 +5,18 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('DebugSettings.appRole', () {
+    test('forceFirstLaunch defaults on and is once per launch', () {
+      final DebugSettings debug = DebugSettings();
+      expect(debug.forceFirstLaunch, isTrue);
+      expect(debug.howToShownThisLaunch, isFalse);
+      expect(debug.howToShownThisLaunchFor(smile: true), isFalse);
+      debug.markHowToShownThisLaunch();
+      expect(debug.howToShownThisLaunch, isTrue);
+      expect(debug.howToShownThisLaunchFor(smile: true), isFalse);
+      debug.markHowToShownThisLaunchFor(smile: true);
+      expect(debug.howToShownThisLaunchFor(smile: true), isTrue);
+    });
+
     test('defaults to user actor', () {
       final DebugSettings debug = DebugSettings();
       expect(debug.appRole, AppRole.user);

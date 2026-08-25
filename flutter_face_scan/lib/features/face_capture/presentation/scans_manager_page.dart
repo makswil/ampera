@@ -98,12 +98,20 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
       );
       return;
     }
+    final String? bakeDir = storage.expressionBakeDirectory(entry.id);
+    final List<String>? sequence = bakeDir == null
+        ? null
+        : await loadExpressionBakeFramePaths(bakeDir);
+    if (!mounted) {
+      return;
+    }
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => ObjModelViewerPage(
           objPath: obj.path,
           title: entry.consumerTitle,
-          subtitle: entry.expression.label,
+          subtitle: entry.expression.productLabel,
+          sequenceObjPaths: sequence,
         ),
       ),
     );
@@ -163,12 +171,12 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
 
   String _subtitle(ScanEntry entry) {
     if (_isDev) {
-      return '${entry.expression.label} · '
+      return '${entry.expression.productLabel} · '
           '${ScanFormat.size(entry.sizeBytes)} · '
           '${ScanFormat.date(entry.modified)}'
           '${entry.displayName == null ? '' : ' · ${entry.id}'}';
     }
-    return entry.expression.label;
+    return entry.expression.productLabel;
   }
 
   @override
@@ -205,6 +213,10 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (BuildContext context, int index) {
                 final ScanEntry entry = _entries[index];
+                final bool wide = MediaQuery.sizeOf(context).width >= 600;
+                final String kind = entry.expression.productLabel;
+                final String name =
+                    _isDev ? entry.title : entry.consumerTitle;
                 return ListTile(
                   leading: pick
                       ? null
@@ -213,8 +225,12 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
                               ? Icons.folder_open_outlined
                               : Icons.view_in_ar_outlined,
                         ),
-                  title: Text(_isDev ? entry.title : entry.consumerTitle),
-                  subtitle: Text(_subtitle(entry)),
+                  title: Text(
+                    !_isDev && wide ? '$name · $kind' : name,
+                  ),
+                  subtitle: _isDev
+                      ? Text(_subtitle(entry))
+                      : (wide ? null : Text(kind)),
                   onTap: pick
                       ? () => Navigator.pop(context, entry.id)
                       : () => unawaited(_open(entry)),

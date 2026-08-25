@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../domain/entities/capture_actor_mode.dart';
+import '../../domain/entities/expression_mode.dart';
 import '../scan_theme.dart';
 
 /// First-time / help dialog for the scan flow.
@@ -9,6 +10,7 @@ Future<bool?> showScanOnboardingSheet(
   required VoidCallback onStart,
   bool showStartButton = true,
   CaptureActorMode actorMode = CaptureActorMode.user,
+  ExpressionMode expression = ExpressionMode.neutral,
 }) {
   return showGeneralDialog<bool>(
     context: context,
@@ -26,6 +28,8 @@ Future<bool?> showScanOnboardingSheet(
       final Color onSurface =
           Theme.of(dialogContext).colorScheme.onSurface;
       final Color muted = onSurface.withValues(alpha: 0.70);
+      final bool smile = expression.isExpressionSequence;
+      final bool clinician = actorMode == CaptureActorMode.practitioner;
       return SafeArea(
         child: Center(
           child: FadeTransition(
@@ -35,24 +39,31 @@ Future<bool?> showScanOnboardingSheet(
                 CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
               ),
               child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 360),
+                constraints: BoxConstraints(
+                  maxWidth: smile ? 420 : 360,
+                ),
                 child: Material(
                   color: Colors.transparent,
                   child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 28),
+                    margin: EdgeInsets.symmetric(horizontal: smile ? 16 : 28),
                     padding: const EdgeInsets.fromLTRB(32, 36, 32, 32),
                     decoration: ScanTheme.dialogSurface(brightness),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: <Widget>[
-                        Icon(Icons.face_retouching_natural,
-                            color: ScanTheme.accent, size: 36),
+                        Icon(
+                            smile
+                                ? Icons.videocam_outlined
+                                : Icons.photo_camera_outlined,
+                            color: ScanTheme.accent,
+                            size: 36),
                         const SizedBox(height: 14),
                         Text(
-                          actorMode == CaptureActorMode.practitioner
-                              ? 'Clinician scan'
-                              : 'How to scan',
+                          _onboardingTitle(
+                            clinician: clinician,
+                            smile: smile,
+                          ),
                           style: Theme.of(dialogContext)
                               .textTheme
                               .titleLarge
@@ -63,45 +74,11 @@ Future<bool?> showScanOnboardingSheet(
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 20),
-                        if (actorMode == CaptureActorMode.practitioner) ...<Widget>[
-                          _Bullet(
-                            icon: Icons.filter_4,
-                            text:
-                                '4 angles — front, left, right, under the chin.',
-                            muted: muted,
-                          ),
-                          _Bullet(
-                            icon: Icons.tablet_mac,
-                            text:
-                                'You move the iPad. Patient keeps still.',
-                            muted: muted,
-                          ),
-                          _Bullet(
-                            icon: Icons.timer_outlined,
-                            text:
-                                'Hold each angle ~2–3 seconds when it turns green.',
-                            muted: muted,
-                          ),
-                        ] else ...<Widget>[
-                          _Bullet(
-                            icon: Icons.filter_4,
-                            text:
-                                '4 angles — front, left, right, chin up.',
-                            muted: muted,
-                          ),
-                          _Bullet(
-                            icon: Icons.timer_outlined,
-                            text:
-                                'Hold still ~2–3 seconds at each angle.',
-                            muted: muted,
-                          ),
-                          _Bullet(
-                            icon: Icons.wb_sunny_outlined,
-                            text:
-                                'Face in the outline, good light. Glasses off if you can.',
-                            muted: muted,
-                          ),
-                        ],
+                        ..._onboardingBullets(
+                          clinician: clinician,
+                          smile: smile,
+                          muted: muted,
+                        ),
                         const SizedBox(height: 28),
                         if (showStartButton)
                           FilledButton(
@@ -132,15 +109,133 @@ Future<bool?> showScanOnboardingSheet(
   );
 }
 
+String _onboardingTitle({required bool clinician, required bool smile}) {
+  if (smile) {
+    return clinician ? 'Clinician expression scan' : 'How to scan an expression';
+  }
+  return clinician ? 'Clinician scan' : 'How to scan';
+}
+
+List<Widget> _onboardingBullets({
+  required bool clinician,
+  required bool smile,
+  required Color muted,
+}) {
+  if (smile) {
+    if (clinician) {
+      return <Widget>[
+        _Bullet(
+          icon: Icons.filter_4,
+          text: 'First capture 4 angles',
+          detail: 'Front, left, right, chin up',
+          muted: muted,
+        ),
+        _Bullet(
+          icon: Icons.tablet_mac,
+          text: 'You move the iPad. The patient stays still.',
+          muted: muted,
+        ),
+        _Bullet(
+          icon: Icons.videocam_outlined,
+          text:
+              'Then the patient looks straight, face at rest — after the countdown they change expression slowly until it finishes.',
+          muted: muted,
+        ),
+        _Bullet(
+          icon: Icons.visibility_off_outlined,
+          text: 'Remove accessories — glasses, hats, earphones.',
+          muted: muted,
+        ),
+      ];
+    }
+    return <Widget>[
+      _Bullet(
+        icon: Icons.filter_4,
+        text: 'First, hold 4 angles',
+        detail: 'Front, left, right, chin up — 2–3 seconds when the outline is green',
+        muted: muted,
+      ),
+      _Bullet(
+        icon: Icons.face_outlined,
+        text: 'Then look straight — face at rest, no expression yet.',
+        muted: muted,
+      ),
+      _Bullet(
+        icon: Icons.videocam_outlined,
+        text:
+            'After the countdown, change expression slowly until recording ends.',
+        muted: muted,
+      ),
+      _Bullet(
+        icon: Icons.visibility_off_outlined,
+        text: 'Remove accessories — glasses, hats, earphones.',
+        muted: muted,
+      ),
+    ];
+  }
+  if (clinician) {
+    return <Widget>[
+      _Bullet(
+        icon: Icons.filter_4,
+        text: 'Capture 4 angles',
+        detail: 'Front, left, right, chin up',
+        muted: muted,
+      ),
+      _Bullet(
+        icon: Icons.tablet_mac,
+        text: 'You move the iPad. The patient stays still.',
+        muted: muted,
+      ),
+      _Bullet(
+        icon: Icons.timer_outlined,
+        text:
+            'Hold each angle 2–3 seconds when the outline turns green.',
+        muted: muted,
+      ),
+      _Bullet(
+        icon: Icons.visibility_off_outlined,
+        text: 'Remove accessories — glasses, hats, earphones.',
+        muted: muted,
+      ),
+    ];
+  }
+  return <Widget>[
+    _Bullet(
+      icon: Icons.filter_4,
+      text: 'Turn your head to 4 angles',
+      detail: 'Front, left, right, chin up',
+      muted: muted,
+    ),
+    _Bullet(
+      icon: Icons.timer_outlined,
+      text:
+          'Hold still 2–3 seconds at each angle when the outline turns green.',
+      muted: muted,
+    ),
+    _Bullet(
+      icon: Icons.crop_free,
+      text: 'Keep your face in the outline, in good light.',
+      muted: muted,
+    ),
+    _Bullet(
+      icon: Icons.visibility_off_outlined,
+      text: 'Remove accessories — glasses, hats, earphones.',
+      muted: muted,
+    ),
+  ];
+}
+
 class _Bullet extends StatelessWidget {
   const _Bullet({
     required this.icon,
     required this.text,
     required this.muted,
+    this.detail,
   });
 
   final IconData icon;
   final String text;
+  final String? detail;
   final Color muted;
 
   @override
@@ -153,13 +248,29 @@ class _Bullet extends StatelessWidget {
           Icon(icon, color: ScanTheme.accent, size: 20),
           const SizedBox(width: 12),
           Expanded(
-            child: Text(
-              text,
-              style: TextStyle(
-                color: muted,
-                fontSize: 15,
-                height: 1.35,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  text,
+                  style: TextStyle(
+                    color: muted,
+                    fontSize: 15,
+                    height: 1.35,
+                  ),
+                ),
+                if (detail != null) ...<Widget>[
+                  const SizedBox(height: 2),
+                  Text(
+                    detail!,
+                    style: TextStyle(
+                      color: muted.withValues(alpha: 0.85),
+                      fontSize: 14,
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
         ],

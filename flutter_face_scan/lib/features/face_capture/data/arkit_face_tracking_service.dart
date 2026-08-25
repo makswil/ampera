@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart';
 
 import '../domain/constants/capture_defaults.dart';
+import '../domain/entities/expression_sequence_result.dart';
 import '../domain/entities/face_observation.dart';
 import '../domain/entities/still_capture.dart';
 import '../domain/services/face_tracking_service.dart';
@@ -141,6 +142,7 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
   Future<StillCapture?> captureStill({
     bool hiRes = false,
     bool lockAeAwb = true,
+    bool currentFrameOnly = false,
   }) async {
     final Map<Object?, Object?>? raw =
         await _control.invokeMethod<Map<Object?, Object?>>(
@@ -148,6 +150,7 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
       <String, Object?>{
         'hiRes': hiRes,
         'lockAeAwb': lockAeAwb,
+        'currentFrameOnly': currentFrameOnly,
       },
     );
     if (raw == null) {
@@ -197,6 +200,72 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
       // Ignore — best-effort unlock.
     } on MissingPluginException {
       // Ignore.
+    }
+  }
+
+  /// Begins writing subsampled JPEG+verts into `<directoryPath>/expression/`.
+  Future<void> startExpressionBuffer({required String directoryPath}) async {
+    await _control.invokeMethod<void>('startExpressionBuffer', <String, Object?>{
+      'directoryPath': directoryPath,
+    });
+  }
+
+  /// Locks the kept window start (onset − lookback), micros since epoch.
+  Future<void> markExpressionStart({required int startMicros}) async {
+    await _control.invokeMethod<void>('markExpressionStart', <String, Object?>{
+      'startMicros': startMicros,
+    });
+  }
+
+  /// Trims to [startMicros, endMicros], writes `sequence.json`, returns result.
+  Future<ExpressionSequenceResult> finalizeExpressionSequence({
+    required int endMicros,
+  }) async {
+    final Map<Object?, Object?>? raw =
+        await _control.invokeMethod<Map<Object?, Object?>>(
+      'finalizeExpressionSequence',
+      <String, Object?>{'endMicros': endMicros},
+    );
+    if (raw == null) {
+      throw StateError('finalizeExpressionSequence returned null');
+    }
+    return ExpressionSequenceResult(
+      directoryPath: raw['directoryPath'] as String? ?? '',
+      frameCount: (raw['frameCount'] as num?)?.toInt() ?? 0,
+      manifestPath: raw['manifestPath'] as String? ?? '',
+    );
+  }
+
+  /// Aborts buffering and deletes the partial `expression/` folder.
+  Future<void> cancelExpressionBuffer() async {
+    try {
+      await _control.invokeMethod<void>('cancelExpressionBuffer');
+    } on PlatformException {
+      // Best-effort.
+    } on MissingPluginException {
+      // Best-effort.
+    }
+  }
+
+  /// Settle + lock TrueDepth AE/AWB for support stills and the smile clip.
+  Future<void> settleAndLockExpressionAeAwb() async {
+    try {
+      await _control.invokeMethod<void>('settleAndLockExpressionAeAwb');
+    } on PlatformException {
+      // Best-effort — capture continues unlocked.
+    } on MissingPluginException {
+      // Best-effort.
+    }
+  }
+
+  /// Restore continuous AE/AWB after an expression run.
+  Future<void> unlockExpressionAeAwb() async {
+    try {
+      await _control.invokeMethod<void>('unlockExpressionAeAwb');
+    } on PlatformException {
+      // Best-effort.
+    } on MissingPluginException {
+      // Best-effort.
     }
   }
 

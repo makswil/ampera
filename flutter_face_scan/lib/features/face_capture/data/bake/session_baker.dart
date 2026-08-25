@@ -16,6 +16,7 @@ import '../../domain/v3/normal_map_baker.dart';
 import '../../domain/v3/texture_projection.dart';
 import '../../domain/v3/vertex_normals.dart';
 import '../../domain/v3/view_weights.dart';
+import 'aperture_pin.dart';
 import 'obj_writer.dart';
 import 'texture_baker.dart';
 
@@ -314,13 +315,12 @@ _BakeResult _runBake(_BakeRequest r) {
       : _computeDownWeights(frontal.vertices);
 
   final List<double> uvs = r.uvs;
-  // Eyes only: author-provided strip triangles on existing verts. Mouth stays
-  // open (no fill).
+  // Eyes + mouth: author-provided strip triangles on existing verts.
   final List<int> triangles = r.fillHoles
-      ? <int>[...r.triangles, ...FaceHoleGeometry.eyeTriangles]
+      ? <int>[...r.triangles, ...FaceHoleGeometry.holeTriangles]
       : r.triangles;
 
-  // Normals from the ORIGINAL triangles so eye cap faces don't crease the rim.
+  // Normals from the ORIGINAL triangles so hole caps don't crease the rim.
   final List<Vector3> normals =
       computeVertexNormals(frontal.vertices, r.triangles);
 
@@ -500,6 +500,15 @@ img.Image _bakeViewDependent({
     weightsFor(rightSource, allowRight),
     if (upSource != null) weightsFor(upSource, allowLower),
   ];
+
+  // L/R stills include gaze toward the camera, so blending them into the eye
+  // holes ghosts a second iris. Keep pupils on the frontal still only.
+  pinVerticesToFrontalPose(
+    weights: weights,
+    frontalVerts: frontal.vertices,
+    vertices: FaceHoleGeometry.eyeVertexIndices,
+    haloSeeds: FaceHoleGeometry.eyeVertexIndices,
+  );
 
   const TextureBaker baker = TextureBaker();
   final List<List<double>> gains = _poseGains(

@@ -109,11 +109,11 @@ abstract final class FaceHorizontalAxis {
   ];
 }
 
-/// Explicit eye-hole fill topology for ARKit's open eye apertures.
+/// Explicit eye- and mouth-hole fill topology for ARKit's open apertures.
 ///
 /// Author-provided triangles on existing verts only (no centroid, no rim
-/// flatten). Mouth stays open. Side naming matches [FaceRegions]: left =
-/// negative local X (anatomical left).
+/// flatten). Side naming for eyes matches [FaceRegions]: left = negative
+/// local X (anatomical left).
 abstract final class FaceHoleGeometry {
   const FaceHoleGeometry._();
 
@@ -173,5 +173,63 @@ abstract final class FaceHoleGeometry {
   static const List<int> eyeTriangles = <int>[
     ...leftEyeTriangles,
     ...rightEyeTriangles,
+  ];
+
+  /// Unique verts on the eye apertures (rims + caps).
+  static final Set<int> eyeVertexIndices = Set<int>.unmodifiable(eyeTriangles);
+
+  /// Mouth aperture fill, 34 triangles, flat `[a,b,c, …]`.
+  static const List<int> mouthTriangles = <int>[
+    249, 393, 404,
+    250, 393, 404,
+    250, 305, 404,
+    250, 251, 305,
+    251, 248, 305,
+    251, 252, 248,
+    247, 248, 252,
+    252, 253, 247,
+    275, 247, 253,
+    253, 254, 275,
+    254, 275, 290,
+    254, 255, 290,
+    274, 290, 255,
+    255, 256, 274,
+    256, 265, 274,
+    24, 256, 265,
+    24, 25, 265,
+    684, 823, 834,
+    823, 834, 685,
+    685, 834, 740,
+    740, 685, 686,
+    686, 740, 683,
+    686, 687, 683,
+    682, 683, 687,
+    682, 687, 688,
+    682, 710, 688,
+    688, 689, 710,
+    689, 710, 725,
+    725, 689, 690,
+    690, 709, 725,
+    690, 691, 709,
+    691, 709, 700,
+    691, 24, 700,
+    700, 25, 24,
+  ];
+
+  /// Closed mouth rim (first == last). Same verts as [mouthTriangles].
+  static const List<int> mouthOutline = <int>[
+    823, 685, 686, 687, 688, 689, 690, 691, 24, 256, 255, 254, 253, 252, 251,
+    250, 393, 249, 404, 305, 248, 247, 275, 290, 274, 265, 25, 700, 709, 725,
+    710, 682, 683, 740, 834, 684, 823,
+  ];
+
+  /// Unique verts on the mouth aperture.
+  static final Set<int> mouthVertexIndices =
+      Set<int>.unmodifiable(mouthOutline);
+
+  /// Eyes + mouth — appended when [fillHoles] is on.
+  static const List<int> holeTriangles = <int>[
+    ...eyeTriangles,
+    ...mouthTriangles,
   ];
 }

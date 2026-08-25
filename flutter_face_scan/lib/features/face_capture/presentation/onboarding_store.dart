@@ -7,23 +7,25 @@ abstract final class OnboardingStore {
   const OnboardingStore._();
 
   static const String _fileName = '.face_scan_onboarding_seen';
+  static const String _smileFileName = '.face_scan_onboarding_seen_smile';
 
-  static Future<File> _file() async {
+  static Future<File> _file({required bool smile}) async {
     final Directory documents = await getApplicationDocumentsDirectory();
-    return File('${documents.path}/$_fileName');
+    final String name = smile ? _smileFileName : _fileName;
+    return File('${documents.path}/$name');
   }
 
-  static Future<bool> hasSeen() async {
+  static Future<bool> hasSeen({bool smile = false}) async {
     try {
-      return (await _file()).exists();
+      return (await _file(smile: smile)).exists();
     } on Object {
       return false;
     }
   }
 
-  static Future<void> markSeen() async {
+  static Future<void> markSeen({bool smile = false}) async {
     try {
-      await (await _file()).writeAsString('1');
+      await (await _file(smile: smile)).writeAsString('1');
     } on Object {
       // Best-effort; onboarding may show again next launch.
     }

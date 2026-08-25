@@ -47,5 +47,45 @@ void main() {
         expect(i, inInclusiveRange(1061, 1084));
       }
     });
+
+    test('mouth has 34 triangles', () {
+      expect(FaceHoleGeometry.mouthTriangles.length, 34 * 3);
+    });
+
+    test('mouth outline is a closed loop starting at 823', () {
+      expect(FaceHoleGeometry.mouthOutline.first, 823);
+      expect(FaceHoleGeometry.mouthOutline.last, 823);
+      expect(FaceHoleGeometry.mouthOutline.length, 37);
+    });
+
+    test('every mouth triangle vertex lies on the mouth outline', () {
+      final Set<int> rim = FaceHoleGeometry.mouthOutline.toSet();
+      for (final int i in FaceHoleGeometry.mouthTriangles) {
+        expect(rim, contains(i));
+      }
+    });
+
+    test('holeTriangles is eyes then mouth', () {
+      expect(
+        FaceHoleGeometry.holeTriangles,
+        equals(<int>[
+          ...FaceHoleGeometry.eyeTriangles,
+          ...FaceHoleGeometry.mouthTriangles,
+        ]),
+      );
+    });
+
+    test('eyeVertexIndices cover both eye ranges', () {
+      expect(FaceHoleGeometry.eyeVertexIndices.length, 48);
+      expect(FaceHoleGeometry.eyeVertexIndices, containsAll(<int>[1085, 1108]));
+      expect(FaceHoleGeometry.eyeVertexIndices, containsAll(<int>[1061, 1084]));
+    });
+
+    test('mouthVertexIndices match outline (closed loop unique)', () {
+      expect(
+        FaceHoleGeometry.mouthVertexIndices,
+        FaceHoleGeometry.mouthOutline.toSet(),
+      );
+    });
   });
 }

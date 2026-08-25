@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../application/capture_state.dart';
@@ -14,6 +16,11 @@ import 'face_guide_layer.dart';
 import 'head_pose_hint.dart';
 import 'scan_onboarding_sheet.dart';
 
+/// Pose = still camera, Expression = clip. Same pair as the how-to sheet.
+IconData scanModeIcon(ExpressionMode mode) => mode.isExpressionSequence
+    ? Icons.videocam_outlined
+    : Icons.photo_camera_outlined;
+
 /// Renders guidance for the current [CaptureState].
 class CaptureOverlay extends StatelessWidget {
   const CaptureOverlay({
@@ -22,12 +29,14 @@ class CaptureOverlay extends StatelessWidget {
     this.onRetake,
     this.onGenerateModel,
     this.canGenerateModel = false,
+    this.hasGeneratedModel = false,
     this.generatingModel = false,
     this.onOpenSettings,
     this.statusLine,
     this.captureBanner,
     this.targetDistanceMeters = PoseTolerance.kDefaultTargetDistanceMeters,
     this.deferPoseGuidance = false,
+    this.holdComplete = false,
     this.selectedExpression = ExpressionMode.neutral,
     this.onExpressionChanged,
     this.selectedActorMode = CaptureActorMode.user,
@@ -36,6 +45,12 @@ class CaptureOverlay extends StatelessWidget {
     this.selectedClinicianCamera = ClinicianCamera.front,
     this.selectedRearCaptureKind = RearCaptureKind.still,
     this.activeCapturePass,
+    this.expressionTitle,
+    this.expressionSubtitle,
+    this.expressionCountdown,
+    this.clipProgress,
+    this.hidePoseProgress = false,
+    this.suppressOutlineProgress = false,
     super.key,
   });
 
@@ -49,6 +64,9 @@ class CaptureOverlay extends StatelessWidget {
   /// True when a bakeable session is loaded (enables Generate after scan).
   final bool canGenerateModel;
 
+  /// True after a 3D model already exists for this scan (hide Rescan/Generate).
+  final bool hasGeneratedModel;
+
   /// True while bake / ml-wb is in flight (center status + hide actions).
   final bool generatingModel;
 
@@ -59,6 +77,9 @@ class CaptureOverlay extends StatelessWidget {
 
   /// Hold pose/completed UI while a still handoff (TrueDepth pause) is in flight.
   final bool deferPoseGuidance;
+
+  /// Pose accepted: keep the face-frame ring fully accent until it fades.
+  final bool holdComplete;
 
   /// Idle-mode picker selection (applied on the next Start).
   final ExpressionMode selectedExpression;
@@ -84,6 +105,25 @@ class CaptureOverlay extends StatelessWidget {
   /// Active sequential pass (mesh→photo); null for single-pass runs.
   final CapturePass? activeCapturePass;
 
+  /// Expression-sequence coaching (large title).
+  final String? expressionTitle;
+
+  /// Optional second line under [expressionTitle].
+  final String? expressionSubtitle;
+
+  /// Big countdown digit (3 / 2 / 1) for expression-sequence.
+  final int? expressionCountdown;
+
+  /// 0–1 smile-clip recording bar; null hides it. Must not read as finished
+  /// until filming actually stops.
+  final double? clipProgress;
+
+  /// Hide the 4-pose dots (expression clip is frontal-only).
+  final bool hidePoseProgress;
+
+  /// Force outline progress ring off (settle must not look like a scan).
+  final bool suppressOutlineProgress;
+
   static PoseGuidance? primaryGuidance(CaptureState state) {
     final List<PoseGuidance>? guidance = state.lastValidation?.guidance;
     if (guidance == null || guidance.isEmpty) {
@@ -97,7 +137,8 @@ class CaptureOverlay extends StatelessWidget {
     final bool capturing = state.status == CaptureStatus.capturing;
     // Last pose flips status to completed before the still finishes — keep the
     // capture layout until deferPoseGuidance clears.
-    final bool inCaptureChrome = capturing || deferPoseGuidance;
+    final bool inCaptureChrome =
+        capturing || deferPoseGuidance || holdComplete;
     final PoseGuidance? primary =
         capturing ? primaryGuidance(state) : null;
     final bool holding = capturing &&
@@ -106,13 +147,17 @@ class CaptureOverlay extends StatelessWidget {
             (state.holdProgress > 0 &&
                 (state.lastValidation?.isOnTarget ?? false)));
 
+    final bool useExpressionCoach =
+        expressionTitle != null || expressionCountdown != null;
+
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
         IgnorePointer(
           child: FaceGuideLayer(
             targetDistanceMeters: targetDistanceMeters,
-            holdProgress: state.holdProgress,
+            holdProgress: suppressOutlineProgress ? 0 : state.holdProgress,
+            holdComplete: holdComplete,
             guidance: primary,
             active: inCaptureChrome,
           ),
@@ -131,48 +176,65 @@ class CaptureOverlay extends StatelessWidget {
 
               return Stack(
                 children: <Widget>[
-                  Positioned(
-                    top: 8,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: SizedBox(
-                        width: (size.width * 0.34).clamp(160.0, 280.0),
-                        child: Semantics(
-                          label: 'Scan progress, '
-                              '${state.completedPoses.length} of '
-                              '${FacePose.captureSequence.length} angles captured',
-                          child: _PoseProgressBar(state: state),
+                  if (!hidePoseProgress)
+                    Positioned(
+                      top: 8,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: SizedBox(
+                          width: (size.width * 0.34).clamp(160.0, 280.0),
+                          child: Semantics(
+                            label: 'Scan progress, '
+                                '${state.completedPoses.length} of '
+                                '${FacePose.captureSequence.length} angles captured',
+                            child: _PoseProgressBar(state: state),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  if (captureBanner != null)
-                    Positioned(
-                      top: 56,
-                      left: 24,
-                      right: 24,
-                      child: _CaptureBanner(text: captureBanner!),
-                    ),
-                  if (!generatingModel)
+                  // While generating, only show the center status — not the
+                  // completed coach ("Expression clip saved") under it.
+                  if (useExpressionCoach && !generatingModel)
                     Positioned(
                       top: guidanceTop,
-                      left: 28,
-                      right: 28,
-                      child: _LiveGuidance(
-                        state: state,
-                        holding: holding,
-                        deferPoseGuidance: deferPoseGuidance,
-                        statusLine: inCaptureChrome ? null : statusLine,
-                        selectedExpression: selectedExpression,
-                        selectedActorMode: selectedActorMode,
-                        selectedPractitionerFlow: selectedPractitionerFlow,
-                        selectedMeshMotion: selectedMeshMotion,
-                        selectedClinicianCamera: selectedClinicianCamera,
-                        selectedRearCaptureKind: selectedRearCaptureKind,
-                        activeCapturePass: activeCapturePass,
+                      left: 24,
+                      right: 24,
+                      child: _ExpressionCoach(
+                        title: expressionTitle,
+                        subtitle: expressionSubtitle,
+                        countdown: expressionCountdown,
+                        progress: clipProgress,
                       ),
-                    ),
+                    )
+                  else if (!useExpressionCoach) ...<Widget>[
+                    if (captureBanner != null)
+                      Positioned(
+                        top: 56,
+                        left: 24,
+                        right: 24,
+                        child: _CaptureBanner(text: captureBanner!),
+                      ),
+                    if (!generatingModel)
+                      Positioned(
+                        top: guidanceTop,
+                        left: 28,
+                        right: 28,
+                        child: _LiveGuidance(
+                          state: state,
+                          holding: holding,
+                          deferPoseGuidance: deferPoseGuidance,
+                          statusLine: inCaptureChrome ? null : statusLine,
+                          selectedExpression: selectedExpression,
+                          selectedActorMode: selectedActorMode,
+                          selectedPractitionerFlow: selectedPractitionerFlow,
+                          selectedMeshMotion: selectedMeshMotion,
+                          selectedClinicianCamera: selectedClinicianCamera,
+                          selectedRearCaptureKind: selectedRearCaptureKind,
+                          activeCapturePass: activeCapturePass,
+                        ),
+                      ),
+                  ],
                   if (generatingModel)
                     const Positioned.fill(
                       child: IgnorePointer(
@@ -190,6 +252,7 @@ class CaptureOverlay extends StatelessWidget {
                         onRetake: onRetake,
                         onGenerateModel: onGenerateModel,
                         canGenerateModel: canGenerateModel,
+                        hasGeneratedModel: hasGeneratedModel,
                         onOpenSettings: onOpenSettings,
                         selectedExpression: selectedExpression,
                         onExpressionChanged: onExpressionChanged,
@@ -233,7 +296,8 @@ class _GeneratingModelStatus extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'This can take a moment.',
+              'This can take a moment.\nPlease keep the app open — '
+              'leaving or locking the phone pauses generation.',
               textAlign: TextAlign.center,
               style: ScanTheme.guidanceBody,
             ),
@@ -331,7 +395,8 @@ class _LiveGuidance extends StatelessWidget {
           ),
         ],
         if (statusLine != null &&
-            state.status != CaptureStatus.capturing) ...<Widget>[
+            state.status != CaptureStatus.capturing &&
+            state.status != CaptureStatus.completed) ...<Widget>[
           const SizedBox(height: 6),
           Text(
             statusLine!,
@@ -446,7 +511,6 @@ class _LiveGuidance extends StatelessWidget {
         return (
           PoseGuidanceCopy.poseInstruction(
             pose,
-            expression: state.expressionMode,
             actorMode: _actorMode,
           ),
           null,
@@ -482,6 +546,7 @@ class _BottomActions extends StatelessWidget {
     this.onRetake,
     this.onGenerateModel,
     this.canGenerateModel = false,
+    this.hasGeneratedModel = false,
     this.onOpenSettings,
     this.selectedExpression = ExpressionMode.neutral,
     this.onExpressionChanged,
@@ -492,6 +557,7 @@ class _BottomActions extends StatelessWidget {
   final VoidCallback? onRetake;
   final VoidCallback? onGenerateModel;
   final bool canGenerateModel;
+  final bool hasGeneratedModel;
   final VoidCallback? onOpenSettings;
   final ExpressionMode selectedExpression;
   final ValueChanged<ExpressionMode>? onExpressionChanged;
@@ -499,9 +565,13 @@ class _BottomActions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bool showStart =
-        state.status == CaptureStatus.idle && onStart != null;
+        (state.status == CaptureStatus.idle ||
+            (state.status == CaptureStatus.completed && hasGeneratedModel)) &&
+        onStart != null;
     final bool showPostScan =
-        state.status == CaptureStatus.completed && onRetake != null;
+        state.status == CaptureStatus.completed &&
+        onRetake != null &&
+        !hasGeneratedModel;
     final bool showGenerate =
         showPostScan && canGenerateModel && onGenerateModel != null;
     final bool isError = state.status == CaptureStatus.error;
@@ -640,7 +710,7 @@ class _PostScanActions extends StatelessWidget {
           const SizedBox(width: _gap),
           Semantics(
             button: true,
-            label: 'Expression ${expression.label}, tap to switch',
+            label: 'Scan mode ${expression.label}, tap to switch',
             child: SizedBox(
               width: _toggleWidth,
               height: 48,
@@ -656,12 +726,7 @@ class _PostScanActions extends StatelessWidget {
                     borderRadius: BorderRadius.zero,
                   ),
                 ),
-                child: Icon(
-                  expression == ExpressionMode.smile
-                      ? Icons.sentiment_satisfied_alt
-                      : Icons.sentiment_neutral,
-                  size: 22,
-                ),
+                child: Icon(scanModeIcon(expression), size: 22),
               ),
             ),
           ),
@@ -752,7 +817,7 @@ class _StartRow extends StatelessWidget {
             const SizedBox(width: _gap),
             Semantics(
               button: true,
-              label: 'Expression ${expression.label}, tap to switch',
+              label: 'Scan mode ${expression.label}, tap to switch',
               child: SizedBox(
                 width: _toggleWidth,
                 height: 48,
@@ -769,9 +834,7 @@ class _StartRow extends StatelessWidget {
                     ),
                   ),
                   child: Icon(
-                    expression == ExpressionMode.smile
-                        ? Icons.sentiment_satisfied_alt
-                        : Icons.sentiment_neutral,
+                    scanModeIcon(expression),
                     size: 22,
                   ),
                 ),
@@ -804,6 +867,146 @@ class _CaptureBanner extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Large expression-sequence coaching (title + optional countdown digit).
+class _ExpressionCoach extends StatelessWidget {
+  const _ExpressionCoach({
+    this.title,
+    this.subtitle,
+    this.countdown,
+    this.progress,
+  });
+
+  final String? title;
+  final String? subtitle;
+  final int? countdown;
+  final double? progress;
+
+  @override
+  Widget build(BuildContext context) {
+    return CameraCornerFrame(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          if (countdown != null && countdown! > 0) ...<Widget>[
+            Text(
+              '$countdown',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 72,
+                fontWeight: FontWeight.w700,
+                height: 1,
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
+          if (title != null && title!.isNotEmpty)
+            Text(
+              title!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 26,
+                fontWeight: FontWeight.w700,
+                height: 1.15,
+              ),
+            ),
+          if (subtitle != null && subtitle!.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              subtitle!,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.85),
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+                height: 1.3,
+              ),
+            ),
+          ],
+          if (progress != null) ...<Widget>[
+            const SizedBox(height: 14),
+            _SmoothClipBar(progress: progress!),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Animates toward [progress]. Completing (→1) is slower so the bar filling
+/// reads as the end of the process before the scan chrome goes away.
+class _SmoothClipBar extends StatefulWidget {
+  const _SmoothClipBar({required this.progress});
+
+  final double progress;
+
+  @override
+  State<_SmoothClipBar> createState() => _SmoothClipBarState();
+}
+
+class _SmoothClipBarState extends State<_SmoothClipBar>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+    );
+    _animation = AlwaysStoppedAnimation<double>(widget.progress.clamp(0, 1));
+  }
+
+  @override
+  void didUpdateWidget(_SmoothClipBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final double next = widget.progress.clamp(0.0, 1.0);
+    if ((next - oldWidget.progress).abs() < 0.0005) {
+      return;
+    }
+    final double from = _animation.value;
+    final bool completing = next >= 0.999;
+    _controller
+      ..duration = Duration(milliseconds: completing ? 520 : 220)
+      ..reset();
+    _animation = Tween<double>(begin: from, end: next).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: completing ? Curves.easeOutCubic : Curves.easeOut,
+      ),
+    );
+    unawaited(_controller.forward());
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge(<Listenable>[_controller, _animation]),
+      builder: (BuildContext context, Widget? _) {
+        return ClipRRect(
+          borderRadius: BorderRadius.zero,
+          child: LinearProgressIndicator(
+            value: _animation.value.clamp(0.0, 1.0),
+            minHeight: 6,
+            backgroundColor: Colors.white.withValues(alpha: 0.22),
+            color: ScanTheme.accent,
+          ),
+        );
+      },
     );
   }
 }
