@@ -44,4 +44,40 @@ void main() {
     expect(left[1], 0);
     expect(left[2], 0.5);
   });
+
+  test('fadeNonFrontalNearSeeds kills sides at seeds, keeps far verts', () {
+    final List<Vector3> verts = <Vector3>[
+      Vector3(0, 0, 0),
+      Vector3(0.002, 0, 0),
+      Vector3(0.04, 0, 0),
+    ];
+    final List<double> frontal = <double>[0.7, 0.7, 0.7];
+    final List<double> left = <double>[0.8, 0.8, 0.8];
+    fadeNonFrontalNearSeeds(
+      weights: <List<double>>[frontal, left],
+      verts: verts,
+      seeds: const <int>[0],
+      innerRadius: 0,
+      outerRadius: 0.005,
+    );
+
+    expect(frontal, <double>[0.7, 0.7, 0.7]);
+    expect(left[0], 0);
+    expect(left[1], greaterThan(0));
+    expect(left[1], lessThan(0.8));
+    expect(left[2], 0.8);
+  });
+
+  test('expandVertexRings walks triangle adjacency', () {
+    // 0-1-2 and 2-3-4 share vertex 2.
+    const List<int> tris = <int>[0, 1, 2, 2, 3, 4];
+    expect(
+      expandVertexRings(seeds: const <int>[0], triangles: tris, rings: 1),
+      <int>{0, 1, 2},
+    );
+    expect(
+      expandVertexRings(seeds: const <int>[0], triangles: tris, rings: 2),
+      <int>{0, 1, 2, 3, 4},
+    );
+  });
 }

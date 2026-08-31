@@ -21,6 +21,7 @@ import '../data/rear_face_tracking_service.dart';
 import '../data/session_folder_loader.dart';
 import '../data/tracking_backend_router.dart';
 import '../domain/constants/capture_defaults.dart';
+import '../domain/constants/expression_sequence_config.dart';
 import '../domain/constants/face_vertex_indices.dart';
 import '../domain/entities/capture_actor_mode.dart';
 import '../domain/entities/capture_session.dart';
@@ -149,14 +150,48 @@ class _CapturePageState extends State<CapturePage> {
 
   Future<void> _stillChain = Future<void>.value();
 
+  /// TrueDepth AE/AWB lock shared with expression clip (same native settle path).
+  bool _frontAeLocked = false;
+
+  /// Settle+lock TrueDepth like the smile clip — before any 4-pose still.
+  Future<void> _ensureFrontAeLockLikeClip() async {
+    if (!_debug.lockAeAwb || _frontAeLocked || _trackingService.isRear) {
+      return;
+    }
+    await _frontTracking.settleAndLockExpressionAeAwb(lockAeAwb: true);
+    _frontAeLocked = true;
+  }
+
+  Future<void> _releaseFrontAeLock() async {
+    if (!_frontAeLocked) {
+      return;
+    }
+    _frontAeLocked = false;
+    try {
+      await _frontTracking.unlockExpressionAeAwb();
+    } on Object {
+      // Best-effort.
+    }
+  }
+
   Future<void> _grabStill(FacePose pose) async {
-    final bool meshPassHiRes = _sequentialPass == CapturePass.mesh;
-    final StillCapture? still = await _trackingService.captureStill(
-      hiRes: _debug.hiResPhoto || _trackingService.isRear || meshPassHiRes,
-      lockAeAwb: _debug.lockAeAwb,
-      preferHarvestedVideoFrame: _wantsRearVideo &&
-          (_sequentialPass == CapturePass.photo || _meshSnapshots != null),
-    );
+    await _ensureFrontAeLockLikeClip();
+    final StillCapture? still;
+    if (_trackingService.isRear) {
+      still = await _trackingService.captureStill(
+        lockAeAwb: _debug.lockAeAwb,
+        preferHarvestedVideoFrame: _wantsRearVideo &&
+            (_sequentialPass == CapturePass.photo || _meshSnapshots != null),
+      );
+    } else {
+      // Front 4-pose = expression clip path: ARKit video frame, one TrueDepth
+      // session + AE/AWB lock. No AVCapture hi-res (that would re-expose).
+      still = await _trackingService.captureStill(
+        hiRes: false,
+        currentFrameOnly: true,
+        lockAeAwb: _debug.lockAeAwb,
+      );
+    }
     if (still != null && still.bytes.isNotEmpty) {
       _stills[pose] = still;
     }
@@ -169,7 +204,8 @@ class _CapturePageState extends State<CapturePage> {
       return;
     }
     Uint8List? freeze;
-    if (_debug.hiResPhoto || _trackingService.isRear) {
+    // Freeze cover only when rear still capture may hitch the preview.
+    if (_trackingService.isRear) {
       freeze = await _trackingService.previewFreeze();
     }
     if (!mounted) {
@@ -208,6 +244,7 @@ class _CapturePageState extends State<CapturePage> {
     await _stillChain;
     CaptureFeedback.scanCompleted();
     await _persist(state);
+    // Keep TrueDepth AE/AWB lock for a following expression clip (same session).
     _clearSequentialStash();
     await _syncIdlePreview();
   }
@@ -218,6 +255,7 @@ class _CapturePageState extends State<CapturePage> {
     if (!mounted || _sequentialPass != CapturePass.mesh) {
       return;
     }
+    await _releaseFrontAeLock();
     _meshSnapshots = List<CaptureSnapshot>.of(meshState.snapshots);
     _meshStills
       ..clear()
@@ -322,6 +360,8 @@ class _CapturePageState extends State<CapturePage> {
       poseValidator: _guidedValidator,
       expressionRecorder: _frontTracking,
     );
+    _expressionBloc.targetFps = _debug.expressionFps;
+    _expressionBloc.lockAeAwb = _debug.lockAeAwb;
     _syncDistanceTolerance();
 
     // Live preview immediately; Start only begins guided capture / saving.
@@ -442,17 +482,23 @@ class _CapturePageState extends State<CapturePage> {
 
   void _onDebugChanged() {
     _syncDistanceTolerance();
+    _expressionBloc.targetFps = _debug.expressionFps;
+    _expressionBloc.lockAeAwb = _debug.lockAeAwb;
     _applyOverlay();
+    // Only abort an *in-flight* capture. Bake toggles (source colours, ml-wb,
+    // view blend, …) must not wipe a completed clip — otherwise Generate falls
+    // back to multipose and source-colour tint never appears.
     final CaptureStatus status = _bloc.state.status;
-    // Any settings tweak leaves the completed/"Scan again" surface and aborts
-    // an in-flight scan so the next action is a clean Start.
-    if (status == CaptureStatus.capturing ||
-        status == CaptureStatus.completed ||
-        status == CaptureStatus.error) {
-      _resetCaptureUiToIdle(playCancelFeedback: status == CaptureStatus.capturing);
+    if (status == CaptureStatus.capturing) {
+      _resetCaptureUiToIdle(playCancelFeedback: true);
+    } else {
+      final ExpressionSequencePhase expr = _expressionBloc.state.phase;
+      if (expr != ExpressionSequencePhase.idle &&
+          expr != ExpressionSequencePhase.completed &&
+          expr != ExpressionSequencePhase.error) {
+        _expressionBloc.add(const ExpressionSequenceStopped());
+      }
     }
-    // Camera switch only when Front/Rear (or operator) selection changed —
-    // not on every distance/HUD slider tick.
     if (_trackingService.backend != _wantedIdleBackend) {
       unawaited(_syncIdlePreview());
     }
@@ -536,6 +582,8 @@ class _CapturePageState extends State<CapturePage> {
   }
 
   Future<void> _beginNeutralCapture() async {
+    // New multipose run — do not inherit a leftover lock from a prior scan.
+    await _releaseFrontAeLock();
     if (_wantsPriorMeshPhotoOnly) {
       final bool ready = await _preparePriorMeshRef();
       if (!ready || !mounted) {
@@ -574,6 +622,8 @@ class _CapturePageState extends State<CapturePage> {
   Future<void> _startExpressionSequence({required bool seen}) async {
     Future<void> kickoff() async {
       if (_trackingService.backend != TrackingBackend.front) {
+        // Camera switch stops the session and drops any carried AE lock.
+        await _releaseFrontAeLock();
         await _trackingService.select(TrackingBackend.front);
         if (mounted) {
           setState(() {});
@@ -586,6 +636,10 @@ class _CapturePageState extends State<CapturePage> {
         _didPersistCurrent = false;
         _baked = null;
       });
+      // Hand 4-pose TrueDepth lock to expression (same ARKit session).
+      _expressionBloc.lockAeAwb = _debug.lockAeAwb;
+      _expressionBloc.carryAeLock = _frontAeLocked && _debug.lockAeAwb;
+      _frontAeLocked = false;
       final Directory documents = await getApplicationDocumentsDirectory();
       final String sessionId =
           'expr_${DateTime.now().millisecondsSinceEpoch}';
@@ -952,10 +1006,10 @@ class _CapturePageState extends State<CapturePage> {
               onChanged: (bool v) => _debug.showHud = v,
             ),
             SwitchListTile(
-              title: const Text('Texture: AVCapture hi-res'),
+              title: const Text('Texture: AVCapture hi-res (rear only)'),
               subtitle: const Text(
-                'On = 7 MP photo per pose (sharper). '
-                'Off = ARKit video (stable).',
+                'Front 4-pose + expression always use ARKit frames (one '
+                'session / one AE-AWB lock). This toggle only affects rear.',
               ),
               value: _debug.hiResPhoto,
               onChanged: (bool v) => _debug.hiResPhoto = v,
@@ -963,9 +1017,8 @@ class _CapturePageState extends State<CapturePage> {
             SwitchListTile(
               title: const Text('Lock AE/AWB after first shot'),
               subtitle: const Text(
-                '4-pose: lock after first still (front hi-res + rear). '
-                'Expression clip: always settles+locks before side photos (this toggle '
-                'does not apply). Off = auto per pose for 4-pose only.',
+                'Default on. One TrueDepth lock from 4-pose through expression '
+                '(same ARKit session). Off = continuous auto.',
               ),
               value: _debug.lockAeAwb,
               onChanged: (bool v) => _debug.lockAeAwb = v,
@@ -985,6 +1038,22 @@ class _CapturePageState extends State<CapturePage> {
               ),
               value: _debug.mlWbExpression,
               onChanged: (bool v) => _debug.mlWbExpression = v,
+            ),
+            ListTile(
+              title: Text('Expression fps: ${_debug.expressionFps}'),
+              subtitle: const Text(
+                'Sample rate while recording the clip (per second). '
+                'ARKit can deliver up to 60. Applies on the next scan.',
+              ),
+            ),
+            Slider(
+              value: _debug.expressionFps.toDouble(),
+              min: ExpressionSequenceConfig.minFps.toDouble(),
+              max: ExpressionSequenceConfig.maxFps.toDouble(),
+              divisions: ExpressionSequenceConfig.maxFps -
+                  ExpressionSequenceConfig.minFps,
+              label: '${_debug.expressionFps} fps',
+              onChanged: (double v) => _debug.expressionFps = v.round(),
             ),
           ],
         ];
@@ -1034,6 +1103,16 @@ class _CapturePageState extends State<CapturePage> {
           subtitle: const Text('Off = leave ARKit apertures open in the model'),
           value: _debug.fillHoles,
           onChanged: (bool v) => _debug.fillHoles = v,
+        ),
+        SwitchListTile(
+          title: const Text('Debug: source colours'),
+          subtitle: const Text(
+            'On = skin kept, strong tint by source. '
+            'Green = clip, red = left cheek, blue = right cheek, '
+            'yellow = chin-up. Mix = blended tint. Generate again.',
+          ),
+          value: _debug.debugSourceColors,
+          onChanged: (bool v) => _debug.debugSourceColors = v,
         ),
         SwitchListTile(
           title: const Text('Chin-up for lower face'),
@@ -1366,6 +1445,7 @@ class _CapturePageState extends State<CapturePage> {
       mlWb: _debug.mlWbExpression,
       mlWbMatchFrontal: _debug.mlWbMatchFrontal,
       fillHoles: _debug.fillHoles,
+      debugSourceColors: _debug.debugSourceColors,
       correctWhiteBalance: _wbCorrector,
     );
   }
@@ -1422,14 +1502,17 @@ class _CapturePageState extends State<CapturePage> {
     }
   }
 
-  /// After bake the model exists — drop Rescan/Generate, keep Start.
+  /// After bake the model exists — drop Rescan UI chrome, keep Start.
+  /// Preserves session / expression paths so Generate can rebake with new
+  /// Dev toggles (e.g. source colours).
   void _returnToScanAfterSessionBake() {
     CaptureFeedback.reset();
     _bannerTimer?.cancel();
     if (_bloc.state.status != CaptureStatus.idle) {
       _bloc.add(const CaptureStopped());
     }
-    if (_expressionBloc.state.phase != ExpressionSequencePhase.idle) {
+    if (_expressionBloc.state.phase != ExpressionSequencePhase.idle &&
+        _expressionBloc.state.phase != ExpressionSequencePhase.completed) {
       _expressionBloc.add(const ExpressionSequenceStopped());
     }
     _clearSequentialStash();
@@ -1444,7 +1527,6 @@ class _CapturePageState extends State<CapturePage> {
       _holdComplete = false;
       _lastExprPhase = ExpressionSequencePhase.idle;
       _didPersistCurrent = false;
-      _expressionManifestPath = null;
     });
   }
 
@@ -1675,6 +1757,7 @@ class _CapturePageState extends State<CapturePage> {
     if (_expressionBloc.state.phase != ExpressionSequencePhase.idle) {
       _expressionBloc.add(const ExpressionSequenceStopped());
     }
+    unawaited(_releaseFrontAeLock());
     _clearSequentialStash();
     setState(() {
       _stills.clear();

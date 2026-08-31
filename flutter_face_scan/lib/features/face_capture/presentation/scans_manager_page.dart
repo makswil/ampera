@@ -21,7 +21,7 @@ import 'session_detail_page.dart';
 class ScansManagerPage extends StatefulWidget {
   const ScansManagerPage({
     this.pickMode = false,
-    this.appRole = AppRole.user,
+    this.appRole = AppRole.developer,
     super.key,
   });
 

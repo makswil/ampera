@@ -38,9 +38,12 @@ abstract final class ExpressionSequenceConfig {
   /// Abort if no mimic onset after countdown within this window.
   static const Duration noOnsetTimeout = Duration(seconds: 15);
 
-  /// Target sample rate while buffering / recording.
-  /// 20 fps × 3 s min ≈ same frame count as the old 12 fps × 5 s.
+  /// Target sample rate while buffering / recording (default).
+  /// Overridable via Dev settings (1–60); ARKit can deliver up to ~60 fps.
   static const double targetFps = 20;
+
+  static const int minFps = 1;
+  static const int maxFps = 60;
 
   /// Hold time for each neutral support still (L / R / chin-up) before capture.
   static const Duration supportHold = Duration(milliseconds: 1200);
@@ -49,6 +52,7 @@ abstract final class ExpressionSequenceConfig {
   static const Duration aeSettleHold = Duration(milliseconds: 800);
 
   /// Capture order for texture support stills (before expression settle).
+  /// Frontal is the clip itself (~20 fps). Chin-up fills under-chin / nostrils.
   static const List<FacePose> supportPoses = <FacePose>[
     FacePose.left40,
     FacePose.right40,

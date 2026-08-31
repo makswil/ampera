@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../domain/constants/capture_defaults.dart';
+import '../../domain/constants/expression_sequence_config.dart';
 import '../../domain/entities/capture_actor_mode.dart';
 import '../../domain/value_objects/pose_tolerance.dart';
 
@@ -11,6 +12,7 @@ import '../../domain/value_objects/pose_tolerance.dart';
 class DebugSettings extends ChangeNotifier {
   DebugSettings({
     bool? fillHoles,
+    bool? debugSourceColors,
     bool? hiResPhoto,
     bool? lockAeAwb,
     bool? chinUpLowerFace,
@@ -22,6 +24,7 @@ class DebugSettings extends ChangeNotifier {
     bool? mlWb,
     bool? mlWbExpression,
     bool? mlWbMatchFrontal,
+    int? expressionFps,
     bool? forceFirstLaunch,
     AppRole? appRole,
     CaptureActorMode? actorMode,
@@ -32,7 +35,8 @@ class DebugSettings extends ChangeNotifier {
     String? meshRefSessionId,
     CaptureStabilityProfile? stabilityProfile,
   }) : _fillHoles = fillHoles ?? true,
-       _hiResPhoto = hiResPhoto ?? true,
+       _debugSourceColors = debugSourceColors ?? false,
+       _hiResPhoto = hiResPhoto ?? false,
        _lockAeAwb = lockAeAwb ?? true,
        _chinUpLowerFace = chinUpLowerFace ?? true,
        _viewDependent = viewDependent ?? true,
@@ -48,10 +52,15 @@ class DebugSettings extends ChangeNotifier {
        _mlWb = mlWb ?? true,
        _mlWbExpression = mlWbExpression ?? false,
        _mlWbMatchFrontal = mlWbMatchFrontal ?? false,
+       _expressionFps = (expressionFps ?? ExpressionSequenceConfig.targetFps.round())
+           .clamp(
+             ExpressionSequenceConfig.minFps,
+             ExpressionSequenceConfig.maxFps,
+           ),
        _forceFirstLaunch = forceFirstLaunch ?? true,
-       _appRole = appRole ?? AppRole.user,
+       _appRole = appRole ?? AppRole.developer,
        _actorMode = actorMode ??
-           (appRole ?? AppRole.user).lockedActorMode ??
+           (appRole ?? AppRole.developer).lockedActorMode ??
            CaptureActorMode.user,
        _practitionerFlow = practitionerFlow ?? PractitionerFlow.meshThenPhotos,
        _meshMotion = meshMotion ?? MeshMotionMode.device,
@@ -64,6 +73,7 @@ class DebugSettings extends ChangeNotifier {
   bool _showHud = false;
   bool _showMesh = false;
   bool _fillHoles;
+  bool _debugSourceColors;
   bool _hiResPhoto;
   bool _lockAeAwb;
   bool _chinUpLowerFace;
@@ -75,6 +85,7 @@ class DebugSettings extends ChangeNotifier {
   bool _mlWb;
   bool _mlWbExpression;
   bool _mlWbMatchFrontal;
+  int _expressionFps;
   bool _forceFirstLaunch;
   bool _howToShownNeutralThisLaunch = false;
   bool _howToShownSmileThisLaunch = false;
@@ -97,14 +108,16 @@ class DebugSettings extends ChangeNotifier {
   /// baked model. Mouth is never filled. Default on.
   bool get fillHoles => _fillHoles;
 
-  /// Texture source: false = ARKit video frame (stable), true = AVCapture hi-res
-  /// still. Default on.
+  /// Expression bake paints source colours (frontal=green, left=red, right=blue)
+  /// instead of photos. Default on while diagnosing mix. Generate again to apply.
+  bool get debugSourceColors => _debugSourceColors;
+
+  /// Texture source for **rear** capture only. Front 4-pose + expression always
+  /// use ARKit video frames (one session / one AE·AWB lock). Default off.
   bool get hiResPhoto => _hiResPhoto;
 
-  /// After the first pose photo (front hi-res or rear still/video) settles
-  /// AE/AWB, lock ISO/shutter/WB gains and reuse for later poses in that
-  /// camera session. Default on. Does **not** apply to the frontal expression clip
-  /// (ARKit video frames). New scan / camera switch clears the lock.
+  /// After the first pose: lock ISO/shutter/WB on TrueDepth and keep it through
+  /// a following expression clip (same ARKit session). Default on.
   bool get lockAeAwb => _lockAeAwb;
 
   /// Whether the lower/under face (chin, jaw underside) is sourced from the
@@ -146,6 +159,10 @@ class DebugSettings extends ChangeNotifier {
   /// still's estimated Kelvin; `false` (default) = → [CaptureDefaults.neutralKelvin].
   /// Generate again to apply.
   bool get mlWbMatchFrontal => _mlWbMatchFrontal;
+
+  /// Expression-clip sample rate (fps) while buffering / recording. 1–60;
+  /// default [ExpressionSequenceConfig.targetFps]. Applies on the next clip.
+  int get expressionFps => _expressionFps;
 
   /// When true, the how-to shows once per app launch (again after
   /// `flutter run`), ignoring the on-disk seen flag. Default on.
@@ -227,6 +244,13 @@ class DebugSettings extends ChangeNotifier {
     }
   }
 
+  set debugSourceColors(bool value) {
+    if (value != _debugSourceColors) {
+      _debugSourceColors = value;
+      notifyListeners();
+    }
+  }
+
   set hiResPhoto(bool value) {
     if (value != _hiResPhoto) {
       _hiResPhoto = value;
@@ -304,6 +328,17 @@ class DebugSettings extends ChangeNotifier {
   set mlWbMatchFrontal(bool value) {
     if (value != _mlWbMatchFrontal) {
       _mlWbMatchFrontal = value;
+      notifyListeners();
+    }
+  }
+
+  set expressionFps(int value) {
+    final int clamped = value.clamp(
+      ExpressionSequenceConfig.minFps,
+      ExpressionSequenceConfig.maxFps,
+    );
+    if (clamped != _expressionFps) {
+      _expressionFps = clamped;
       notifyListeners();
     }
   }

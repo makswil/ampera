@@ -501,13 +501,16 @@ img.Image _bakeViewDependent({
     if (upSource != null) weightsFor(upSource, allowLower),
   ];
 
-  // L/R stills include gaze toward the camera, so blending them into the eye
-  // holes ghosts a second iris. Keep pupils on the frontal still only.
+  // Aperture + lid rings from this frontal still.
+  final Set<int> periocular = expandVertexRings(
+    seeds: FaceHoleGeometry.eyeVertexIndices,
+    triangles: triangles,
+    rings: 2,
+  );
   pinVerticesToFrontalPose(
     weights: weights,
     frontalVerts: frontal.vertices,
-    vertices: FaceHoleGeometry.eyeVertexIndices,
-    haloSeeds: FaceHoleGeometry.eyeVertexIndices,
+    vertices: periocular,
   );
 
   const TextureBaker baker = TextureBaker();
@@ -530,6 +533,8 @@ img.Image _bakeViewDependent({
     triangles: triangles,
     textureSize: textureSize,
     blend: blend,
+    screenSpaceFrontalVertices: FaceHoleGeometry.eyeVertexIndices,
+    frontalOnlyVertices: periocular,
   );
 }
 

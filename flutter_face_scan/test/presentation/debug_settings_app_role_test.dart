@@ -17,11 +17,11 @@ void main() {
       expect(debug.howToShownThisLaunchFor(smile: true), isTrue);
     });
 
-    test('defaults to user actor', () {
+    test('defaults to developer role', () {
       final DebugSettings debug = DebugSettings();
-      expect(debug.appRole, AppRole.user);
+      expect(debug.appRole, AppRole.developer);
       expect(debug.actorMode, CaptureActorMode.user);
-      expect(debug.isDev, isFalse);
+      expect(debug.isDev, isTrue);
     });
 
     test('clinician role locks actorMode to practitioner', () {

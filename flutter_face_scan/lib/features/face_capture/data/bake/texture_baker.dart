@@ -39,6 +39,7 @@ final class WeightedPose {
     required this.pose,
     required this.weight,
     this.gain = const <double>[1, 1, 1],
+    this.debugRgb,
   });
 
   final BakePose pose;
@@ -51,6 +52,11 @@ final class WeightedPose {
   /// reference (frontal) exposure/white-balance. `[1,1,1]` = no correction.
   /// See [TextureBaker.poseGain].
   final List<double> gain;
+
+  /// Source-debug tint colour. With [TextureBaker.bakeViewDependent] `debugTint`
+  /// > 0, photo samples stay visible and lerp toward this RGB (filter look).
+  /// With `debugTint` == 0 and this set, paints solid debug colour (legacy).
+  final List<int>? debugRgb;
 }
 
 /// Bakes the face texture (ARKit UV atlas) from the three poses: per texel →
@@ -58,6 +64,33 @@ final class WeightedPose {
 /// frontal↔side by [FaceRegions.sideWeight]. Output PNG is top-left origin. Pure.
 final class TextureBaker {
   const TextureBaker();
+
+  /// Clip / frontal source in [debugRgb] maps.
+  static const List<int> debugFrontalRgb = <int>[40, 230, 90];
+
+  /// Anatomical left cheek (right40 still).
+  static const List<int> debugLeftRgb = <int>[235, 55, 70];
+
+  /// Anatomical right cheek (left40 still).
+  static const List<int> debugRightRgb = <int>[55, 105, 255];
+
+  /// Chin-up support still (under-chin / nostrils).
+  static const List<int> debugChinUpRgb = <int>[255, 200, 40];
+
+  static List<int> debugRgbForIndex(int i) {
+    switch (i) {
+      case 0:
+        return debugFrontalRgb;
+      case 1:
+        return debugLeftRgb;
+      case 2:
+        return debugRightRgb;
+      case 3:
+        return debugChinUpRgb;
+      default:
+        return const <int>[255, 0, 255];
+    }
+  }
 
   img.Image bake({
     required BakePose frontal,
@@ -107,6 +140,18 @@ final class TextureBaker {
   /// [solidFillFromFlatIndex]: flat triangle-list offset at which aperture-fill
   /// tris begin (e.g. mouth caps). Those tris get a flat dark fill — no photo
   /// projection into the cavity (avoids patchy grey / wrong lip colours).
+  ///
+  /// [screenSpaceFrontalVertices]: triangles whose three verts are in this set
+  /// (eye hole caps) sample the **first** pose in 2D photo space — lerp the
+  /// projected rim pixels — instead of 3D-interpolate-then-project. That copies
+  /// the inner eye from the frontal JPEG as seen between the lids.
+  /// [frontalOnlyVertices]: any triangle that touches this set (eyelids) is
+  /// rasterized from the first pose only — side stills cannot bleed an iris
+  /// through barycentric mix at the lid/cheek boundary.
+  ///
+  /// [debugTint]: 0 = normal (or solid [WeightedPose.debugRgb] if set).
+  /// (0,1] = sample the photo, then lerp toward each pose's [debugRgb]
+  /// (skin still readable; strong colour filter for source maps).
   img.Image bakeViewDependent({
     required List<WeightedPose> poses,
     required List<double> uvs,
@@ -115,6 +160,9 @@ final class TextureBaker {
     bool blend = true,
     int? solidFillFromFlatIndex,
     List<int> solidFillRgb = const <int>[12, 8, 8],
+    Set<int>? screenSpaceFrontalVertices,
+    Set<int>? frontalOnlyVertices,
+    double debugTint = 0,
   }) {
     final img.Image out = img.Image(
       width: textureSize,
@@ -157,6 +205,44 @@ final class TextureBaker {
         );
         continue;
       }
+      if (screenSpaceFrontalVertices != null &&
+          screenSpaceFrontalVertices.contains(a) &&
+          screenSpaceFrontalVertices.contains(b) &&
+          screenSpaceFrontalVertices.contains(c)) {
+        _rasterizeScreenSpaceFrontal(
+          out,
+          poses.first.pose,
+          uvPx[a],
+          uvPx[b],
+          uvPx[c],
+          a,
+          b,
+          c,
+          textureSize,
+          debugRgb: poses.first.debugRgb,
+          debugTint: debugTint,
+        );
+        continue;
+      }
+      if (frontalOnlyVertices != null &&
+          (frontalOnlyVertices.contains(a) ||
+              frontalOnlyVertices.contains(b) ||
+              frontalOnlyVertices.contains(c))) {
+        _rasterizeViewDependent(
+          out,
+          <WeightedPose>[poses.first],
+          uvPx[a],
+          uvPx[b],
+          uvPx[c],
+          a,
+          b,
+          c,
+          textureSize,
+          blend,
+          debugTint,
+        );
+        continue;
+      }
       _rasterizeViewDependent(
         out,
         poses,
@@ -168,10 +254,181 @@ final class TextureBaker {
         c,
         textureSize,
         blend,
+        debugTint,
       );
     }
 
     return out;
+  }
+
+  /// Rasterize per-vertex RGB into the UV atlas (barycentric lerp). [rgb] is
+  /// flat `r,g,b` per vertex, length ≥ vertexCount·3. Uncovered texels stay
+  /// transparent. Pure.
+  img.Image bakeVertexRgb({
+    required List<int> rgb,
+    required List<double> uvs,
+    required List<int> triangles,
+    int textureSize = 1024,
+  }) {
+    final img.Image out = img.Image(
+      width: textureSize,
+      height: textureSize,
+      numChannels: 4,
+    );
+    final List<Vector2> uvPx = <Vector2>[
+      for (int i = 0; i + 1 < uvs.length; i += 2)
+        Vector2(uvs[i] * textureSize, uvs[i + 1] * textureSize),
+    ];
+    for (int t = 0; t + 2 < triangles.length; t += 3) {
+      final int a = triangles[t];
+      final int b = triangles[t + 1];
+      final int c = triangles[t + 2];
+      if (a >= uvPx.length || b >= uvPx.length || c >= uvPx.length) {
+        continue;
+      }
+      _rasterizeVertexRgb(
+        out,
+        rgb,
+        uvPx[a],
+        uvPx[b],
+        uvPx[c],
+        a,
+        b,
+        c,
+        textureSize,
+      );
+    }
+    return out;
+  }
+
+  void _rasterizeVertexRgb(
+    img.Image out,
+    List<int> rgb,
+    Vector2 uvA,
+    Vector2 uvB,
+    Vector2 uvC,
+    int a,
+    int b,
+    int c,
+    int size,
+  ) {
+    final int minX = math.max(0, _floor3(uvA.x, uvB.x, uvC.x));
+    final int maxX = math.min(size - 1, _ceil3(uvA.x, uvB.x, uvC.x));
+    final int minY = math.max(0, _floor3(uvA.y, uvB.y, uvC.y));
+    final int maxY = math.min(size - 1, _ceil3(uvA.y, uvB.y, uvC.y));
+    if (minX > maxX || minY > maxY) {
+      return;
+    }
+    final int ai = a * 3;
+    final int bi = b * 3;
+    final int ci = c * 3;
+    if (ai + 2 >= rgb.length || bi + 2 >= rgb.length || ci + 2 >= rgb.length) {
+      return;
+    }
+    for (int py = minY; py <= maxY; py++) {
+      for (int px = minX; px <= maxX; px++) {
+        final Vector2 p = Vector2(px + 0.5, py + 0.5);
+        final Vector3? bc = barycentric(p, uvA, uvB, uvC);
+        if (bc == null || bc.x < 0 || bc.y < 0 || bc.z < 0) {
+          continue;
+        }
+        final int r = (bc.x * rgb[ai] + bc.y * rgb[bi] + bc.z * rgb[ci])
+            .round()
+            .clamp(0, 255);
+        final int g = (bc.x * rgb[ai + 1] + bc.y * rgb[bi + 1] + bc.z * rgb[ci + 1])
+            .round()
+            .clamp(0, 255);
+        final int bch =
+            (bc.x * rgb[ai + 2] + bc.y * rgb[bi + 2] + bc.z * rgb[ci + 2])
+                .round()
+                .clamp(0, 255);
+        out.setPixelRgba(px, py, r, g, bch, 255);
+      }
+    }
+  }
+
+  /// Eye-cap tris: UV raster like the rest of the atlas, photo lookup in 2D.
+  /// `pixel = bc · project(rim)` copies whatever sits between the lids in the
+  /// frontal JPEG, instead of hitting a receded iris via a flat 3D disc.
+  void _rasterizeScreenSpaceFrontal(
+    img.Image out,
+    BakePose frontal,
+    Vector2 uvA,
+    Vector2 uvB,
+    Vector2 uvC,
+    int a,
+    int b,
+    int c,
+    int size, {
+    List<int>? debugRgb,
+    double debugTint = 0,
+  }) {
+    if (a >= frontal.vertices.length ||
+        b >= frontal.vertices.length ||
+        c >= frontal.vertices.length) {
+      return;
+    }
+    final Vector2? pA = frontal.projection.projectPixel(frontal.vertices[a]);
+    final Vector2? pB = frontal.projection.projectPixel(frontal.vertices[b]);
+    final Vector2? pC = frontal.projection.projectPixel(frontal.vertices[c]);
+    if (pA == null || pB == null || pC == null) {
+      return;
+    }
+    final _Rgb? debug = _rgbFromDebug(debugRgb);
+    final double tint = debugTint.clamp(0.0, 1.0);
+    if (debug != null && tint <= 0) {
+      _rasterizeScreenSpaceLoop(out, uvA, uvB, uvC, size, (_) => debug);
+      return;
+    }
+    _rasterizeScreenSpaceLoop(
+      out,
+      uvA,
+      uvB,
+      uvC,
+      size,
+      (Vector3 bc) {
+        final double sx = bc.x * pA.x + bc.y * pB.x + bc.z * pC.x;
+        final double sy = bc.x * pA.y + bc.y * pB.y + bc.z * pC.y;
+        final _Rgb? photo = _sampleBilinear(frontal.image, sx, sy);
+        if (photo == null) {
+          return null;
+        }
+        if (debug == null || tint <= 0) {
+          return photo;
+        }
+        return _lerp(photo, debug, tint);
+      },
+    );
+  }
+
+  void _rasterizeScreenSpaceLoop(
+    img.Image out,
+    Vector2 uvA,
+    Vector2 uvB,
+    Vector2 uvC,
+    int size,
+    _Rgb? Function(Vector3 bc) sample,
+  ) {
+    final int minX = math.max(0, _floor3(uvA.x, uvB.x, uvC.x));
+    final int maxX = math.min(size - 1, _ceil3(uvA.x, uvB.x, uvC.x));
+    final int minY = math.max(0, _floor3(uvA.y, uvB.y, uvC.y));
+    final int maxY = math.min(size - 1, _ceil3(uvA.y, uvB.y, uvC.y));
+    if (minX > maxX || minY > maxY) {
+      return;
+    }
+    for (int py = minY; py <= maxY; py++) {
+      for (int px = minX; px <= maxX; px++) {
+        final Vector2 p = Vector2(px + 0.5, py + 0.5);
+        final Vector3? bc = barycentric(p, uvA, uvB, uvC);
+        if (bc == null || bc.x < 0 || bc.y < 0 || bc.z < 0) {
+          continue;
+        }
+        final _Rgb? colour = sample(bc);
+        if (colour != null) {
+          out.setPixelRgba(px, py, colour.r, colour.g, colour.b, 255);
+        }
+      }
+    }
   }
 
   void _rasterizeSolid(
@@ -213,8 +470,9 @@ final class TextureBaker {
     int b,
     int c,
     int size,
-    bool blend,
-  ) {
+    bool blend, [
+    double debugTint = 0,
+  ]) {
     final int minX = math.max(0, _floor3(uvA.x, uvB.x, uvC.x));
     final int maxX = math.min(size - 1, _ceil3(uvA.x, uvB.x, uvC.x));
     final int minY = math.max(0, _floor3(uvA.y, uvB.y, uvC.y));
@@ -255,7 +513,7 @@ final class TextureBaker {
             if (w <= 0) {
               continue;
             }
-            final _Rgb? s = _sampleFace(poses[i].pose, bc, a, b, c);
+            final _Rgb? s = _poseSample(poses[i], bc, a, b, c, debugTint);
             if (s == null) {
               continue;
             }
@@ -281,7 +539,7 @@ final class TextureBaker {
             if (w <= bestW) {
               continue;
             }
-            final _Rgb? s = _sampleFace(poses[i].pose, bc, a, b, c);
+            final _Rgb? s = _poseSample(poses[i], bc, a, b, c, debugTint);
             if (s == null) {
               continue;
             }
@@ -302,7 +560,8 @@ final class TextureBaker {
             ? (bc.x * wA[0] + bc.y * wB[0] + bc.z * wC[0])
             : 0;
         if (frontW > 0.05) {
-          final _Rgb? fallback = _sampleFace(poses.first.pose, bc, a, b, c);
+          final _Rgb? fallback =
+              _poseSample(poses.first, bc, a, b, c, debugTint);
           if (fallback != null) {
             out.setPixelRgba(px, py, fallback.r, fallback.g, fallback.b, 255);
           }
@@ -382,6 +641,40 @@ final class TextureBaker {
     }
   }
 
+  _Rgb? _poseSample(
+    WeightedPose pose,
+    Vector3 bc,
+    int a,
+    int b,
+    int c, [
+    double debugTint = 0,
+  ]) {
+    final _Rgb? debug = _rgbFromDebug(pose.debugRgb);
+    final double tint = debugTint.clamp(0.0, 1.0);
+    if (debug != null && tint <= 0) {
+      return debug;
+    }
+    final _Rgb? photo = _sampleFace(pose.pose, bc, a, b, c);
+    if (photo == null) {
+      return debug != null && tint > 0 ? debug : null;
+    }
+    if (debug == null || tint <= 0) {
+      return photo;
+    }
+    return _lerp(photo, debug, tint);
+  }
+
+  static _Rgb? _rgbFromDebug(List<int>? rgb) {
+    if (rgb == null || rgb.length < 3) {
+      return null;
+    }
+    return _Rgb(
+      rgb[0].clamp(0, 255).toInt(),
+      rgb[1].clamp(0, 255).toInt(),
+      rgb[2].clamp(0, 255).toInt(),
+    );
+  }
+
   /// Interpolates the face-local point at [bc] across the pose's own vertices,
   /// projects it into that pose's still and bilinearly samples the colour.
   _Rgb? _sampleFace(BakePose pose, Vector3 bc, int a, int b, int c) {
@@ -413,6 +706,12 @@ final class TextureBaker {
   /// weights exceed [minWeight]. This removes AE/AWB/exposure seams when the two
   /// are stitched. Returns `[1,1,1]` (no correction) if the overlap is too small
   /// ([minSamples]) or degenerate. Gains are clamped to `[minGain, maxGain]`.
+  ///
+  /// Samples are weighted by `min(ref, pose)` so the actual stitch band drives
+  /// the gain (not equal-weight cheek blobs far from the seam).
+  ///
+  /// [luminanceOnly]: one Rec.709 scale on R=G=B — kills brightness blotches
+  /// without per-channel colour shifts (better for side-lit nose wings).
   List<double> poseGain({
     required BakePose reference,
     required BakePose pose,
@@ -422,13 +721,15 @@ final class TextureBaker {
     int minSamples = 50,
     double minGain = 0.5,
     double maxGain = 2.0,
+    bool luminanceOnly = false,
   }) {
-    double sr = 0, sg = 0, sb = 0; // reference sums
+    double sr = 0, sg = 0, sb = 0; // reference sums (weight-scaled)
     double pr = 0, pg = 0, pb = 0; // pose sums
     int count = 0;
     final int n = math.min(refWeight.length, poseWeight.length);
     for (int i = 0; i < n; i++) {
-      if (refWeight[i] <= minWeight || poseWeight[i] <= minWeight) {
+      final double w = math.min(refWeight[i], poseWeight[i]);
+      if (w <= minWeight) {
         continue;
       }
       final _Rgb? rc = _sampleVertex(reference, i);
@@ -436,16 +737,26 @@ final class TextureBaker {
       if (rc == null || pc == null) {
         continue;
       }
-      sr += rc.r;
-      sg += rc.g;
-      sb += rc.b;
-      pr += pc.r;
-      pg += pc.g;
-      pb += pc.b;
+      sr += rc.r * w;
+      sg += rc.g * w;
+      sb += rc.b * w;
+      pr += pc.r * w;
+      pg += pc.g * w;
+      pb += pc.b * w;
       count++;
     }
     if (count < minSamples || pr <= 0 || pg <= 0 || pb <= 0) {
       return const <double>[1, 1, 1];
+    }
+    if (luminanceOnly) {
+      // Rec.709 luma on weighted channel sums (same scale cancels).
+      final double yRef = 0.2126 * sr + 0.7152 * sg + 0.0722 * sb;
+      final double yPose = 0.2126 * pr + 0.7152 * pg + 0.0722 * pb;
+      if (yPose <= 0 || yRef <= 0) {
+        return const <double>[1, 1, 1];
+      }
+      final double g = (yRef / yPose).clamp(minGain, maxGain);
+      return <double>[g, g, g];
     }
     return <double>[
       (sr / pr).clamp(minGain, maxGain),

@@ -139,6 +139,7 @@ final class ModelGenerateService extends ChangeNotifier {
     required bool mlWb,
     required bool mlWbMatchFrontal,
     required bool fillHoles,
+    bool debugSourceColors = false,
     required ModelGenerateWbCorrector? correctWhiteBalance,
   }) async {
     if (_running) {
@@ -179,6 +180,7 @@ final class ModelGenerateService extends ChangeNotifier {
           manifestPath: manifestPath,
           textureSize: 1024,
           fillHoles: fillHoles,
+          debugSourceColors: debugSourceColors,
           jpegOverrides: jpegOverrides,
         ),
       );

@@ -137,8 +137,9 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
 
   /// Portrait JPEG + projection for the current frame; null if no face.
   ///
-  /// [hiRes]: pause ARKit, shoot ~7 MP AVCapture photo, resume.
-  /// [lockAeAwb]: reuse exposure/WB from the first hi-res shot.
+  /// Front 4-pose / expression use [currentFrameOnly] (ARKit, same session +
+  /// AE/AWB lock). [hiRes] pauses ARKit for an AVCapture photo — rear / legacy.
+  /// [lockAeAwb]: keep TrueDepth exposure/WB after settle.
   Future<StillCapture?> captureStill({
     bool hiRes = false,
     bool lockAeAwb = true,
@@ -204,9 +205,14 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
   }
 
   /// Begins writing subsampled JPEG+verts into `<directoryPath>/expression/`.
-  Future<void> startExpressionBuffer({required String directoryPath}) async {
+  /// [targetFps] caps how often a frame is kept (1–60).
+  Future<void> startExpressionBuffer({
+    required String directoryPath,
+    int targetFps = 20,
+  }) async {
     await _control.invokeMethod<void>('startExpressionBuffer', <String, Object?>{
       'directoryPath': directoryPath,
+      'targetFps': targetFps.clamp(1, 60),
     });
   }
 
@@ -247,10 +253,14 @@ final class ArkitFaceTrackingService implements FaceTrackingService {
     }
   }
 
-  /// Settle + lock TrueDepth AE/AWB for support stills and the smile clip.
-  Future<void> settleAndLockExpressionAeAwb() async {
+  /// Settle + lock TrueDepth AE/AWB. Reuses an existing lock (e.g. after 4-pose)
+  /// so multipose and expression share exposure.
+  Future<void> settleAndLockExpressionAeAwb({bool lockAeAwb = true}) async {
     try {
-      await _control.invokeMethod<void>('settleAndLockExpressionAeAwb');
+      await _control.invokeMethod<void>(
+        'settleAndLockExpressionAeAwb',
+        <String, Object?>{'lockAeAwb': lockAeAwb},
+      );
     } on PlatformException {
       // Best-effort — capture continues unlocked.
     } on MissingPluginException {

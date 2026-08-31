@@ -117,6 +117,32 @@ void main() {
       );
       expect(gain[0], 2.0);
     });
+
+    test('luminanceOnly uses one Rec.709 scale on all channels', () {
+      final List<double> gain = const TextureBaker().poseGain(
+        reference: _pose(_solid(200, 100, 50)),
+        pose: _pose(_solid(100, 50, 25)),
+        refWeight: <double>[1, 1, 1],
+        poseWeight: <double>[1, 1, 1],
+        minSamples: 1,
+        luminanceOnly: true,
+      );
+      expect(gain[0], closeTo(2.0, 1e-6));
+      expect(gain[1], gain[0]);
+      expect(gain[2], gain[0]);
+    });
+
+    test('seam weight prefers stronger min(ref,pose) overlap', () {
+      // Equal RGB ratio everywhere; heavier seam sample must not skew.
+      final List<double> gain = const TextureBaker().poseGain(
+        reference: _pose(_solid(150, 150, 150)),
+        pose: _pose(_solid(100, 100, 100)),
+        refWeight: <double>[0.05, 1.0, 0.05],
+        poseWeight: <double>[0.05, 1.0, 0.05],
+        minSamples: 1,
+      );
+      expect(gain[0], closeTo(1.5, 1e-6));
+    });
   });
 
   group('neutral white balance (poseMeanColor + gainToTarget)', () {
@@ -174,5 +200,129 @@ void main() {
     expect(c.r, 200);
     expect(c.g, 200);
     expect(c.b, 200);
+  });
+
+  test('screen-space frontal copies 2D photo interior, not 3D disc', () {
+    // clip.w = z+1 so perspective divide makes 3D-lerp≠2D-lerp of projections.
+    final Matrix4 proj = Matrix4.identity()..setEntry(3, 2, 1);
+    final img.Image photo = img.Image(width: 32, height: 32, numChannels: 4);
+    for (int y = 0; y < 32; y++) {
+      for (int x = 0; x < 32; x++) {
+        photo.setPixelRgba(x, y, 0, 0, 0, 255);
+      }
+    }
+
+    BakePose poseAt(List<Vector3> verts) => BakePose(
+          image: photo,
+          vertices: verts,
+          projection: PoseProjection(
+            width: 32,
+            height: 32,
+            viewMatrix: Matrix4.identity(),
+            projectionMatrix: proj,
+            faceTransform: Matrix4.identity(),
+          ),
+          viewMatrix: Matrix4.identity(),
+          faceTransform: Matrix4.identity(),
+        );
+
+    final List<Vector3> verts = <Vector3>[
+      Vector3(0.2, 0.2, 0),
+      Vector3(-0.2, 0.2, 0),
+      Vector3(0, -0.2, 4),
+    ];
+    final BakePose pose = poseAt(verts);
+    final Vector2 pA = pose.projection.projectPixel(verts[0])!;
+    final Vector2 pB = pose.projection.projectPixel(verts[1])!;
+    final Vector2 pC = pose.projection.projectPixel(verts[2])!;
+    final Vector3 mid3 = (verts[0] + verts[1] + verts[2]) / 3;
+    final Vector2 p3d = pose.projection.projectPixel(mid3)!;
+    final Vector2 p2d = (pA + pB + pC) / 3;
+
+    photo.setPixelRgba(p3d.x.round().clamp(0, 31), p3d.y.round().clamp(0, 31),
+        255, 0, 0, 255);
+    photo.setPixelRgba(p2d.x.round().clamp(0, 31), p2d.y.round().clamp(0, 31),
+        0, 255, 0, 255);
+
+    img.Pixel atlasPixel(Set<int>? screenSpace) {
+      final img.Image out = const TextureBaker().bakeViewDependent(
+        poses: <WeightedPose>[
+          WeightedPose(pose: pose, weight: <double>[1, 1, 1]),
+        ],
+        uvs: uvs,
+        triangles: triangles,
+        textureSize: 4,
+        screenSpaceFrontalVertices: screenSpace,
+      );
+      return out.getPixel(1, 1);
+    }
+
+    final img.Pixel disc = atlasPixel(null);
+    final img.Pixel screen = atlasPixel(const <int>{0, 1, 2});
+    // 3D path hits the red mark; 2D eye-cap path hits the green mark.
+    expect(disc.r.toInt(), greaterThan(disc.g.toInt()));
+    expect(screen.g.toInt(), greaterThan(screen.r.toInt()));
+  });
+
+  test('debugRgb mix paints source colours, not photos', () {
+    final List<WeightedPose> coloured = <WeightedPose>[
+      WeightedPose(
+        pose: _pose(_solid(0, 0, 0)),
+        weight: <double>[1, 1, 1],
+        debugRgb: const <int>[255, 0, 0],
+      ),
+      WeightedPose(
+        pose: _pose(_solid(0, 0, 0)),
+        weight: <double>[1, 1, 1],
+        debugRgb: const <int>[0, 0, 255],
+      ),
+    ];
+    final img.Image out = const TextureBaker().bakeViewDependent(
+      poses: coloured,
+      uvs: uvs,
+      triangles: triangles,
+      textureSize: 4,
+      blend: true,
+    );
+    final ({int r, int g, int b}) c = firstCovered(out);
+    expect(c.r, closeTo(128, 2));
+    expect(c.g, 0);
+    expect(c.b, closeTo(128, 2));
+  });
+
+  test('debugTint keeps photo detail while shifting toward debugRgb', () {
+    final List<WeightedPose> tinted = <WeightedPose>[
+      WeightedPose(
+        pose: _pose(_solid(200, 200, 200)),
+        weight: <double>[1, 1, 1],
+        debugRgb: const <int>[0, 255, 0],
+      ),
+    ];
+    final img.Image out = const TextureBaker().bakeViewDependent(
+      poses: tinted,
+      uvs: uvs,
+      triangles: triangles,
+      textureSize: 4,
+      blend: true,
+      debugTint: 0.5,
+    );
+    final ({int r, int g, int b}) c = firstCovered(out);
+    // lerp(200,0,0.5)=100, lerp(200,255,0.5)=228, blue same 100.
+    expect(c.r, closeTo(100, 2));
+    expect(c.g, closeTo(228, 2));
+    expect(c.b, closeTo(100, 2));
+  });
+
+  test('bakeVertexRgb paints a solid per-vertex colour', () {
+    final img.Image out = const TextureBaker().bakeVertexRgb(
+      rgb: <int>[0, 255, 0, 0, 255, 0, 0, 255, 0],
+      uvs: uvs,
+      triangles: triangles,
+      textureSize: 4,
+    );
+    final ({int r, int g, int b}) c = firstCovered(out);
+    expect(c.r, 0);
+    expect(c.g, 255);
+    expect(c.b, 0);
   });
 }

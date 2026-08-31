@@ -3,7 +3,8 @@ enum ExpressionSequencePhase {
   /// Waiting for Start.
   idle,
 
-  /// Frontal hold while AE/AWB settles, then lock for the whole expression run.
+  /// Frontal hold while AE/AWB settles, then optional lock (same as 4-pose) for
+  /// the whole expression run when Dev "Lock AE/AWB" is on.
   aeSettle,
 
   /// Neutral left turn (~40°) still for side texture support.
@@ -12,7 +13,7 @@ enum ExpressionSequencePhase {
   /// Neutral right turn (~40°) still for side texture support.
   supportRight,
 
-  /// Neutral chin-up still for under-nose / chin gap fill (expression bake).
+  /// Neutral chin-up still for under-chin / nostril gap fill.
   supportUp,
 
   /// Face must be frontal; nothing is persisted yet for the clip.

@@ -47,6 +47,16 @@ final class ExpressionSequenceBloc
   final ArkitFaceTrackingService _recorder;
   final DateTime Function() _now;
 
+  /// Sample rate passed to native on the next buffer start (Dev settings).
+  int targetFps = ExpressionSequenceConfig.targetFps.round();
+
+  /// Same Dev toggle as 4-pose: settle + lock AE/AWB for support stills + clip.
+  bool lockAeAwb = true;
+
+  /// One-shot: TrueDepth lock already held from a preceding 4-pose scan — reuse
+  /// it instead of settling fresh. Cleared when the run starts.
+  bool carryAeLock = false;
+
   StreamSubscription<FaceObservation>? _subscription;
   Timer? _countdownTimer;
   String? _directoryPath;
@@ -88,7 +98,8 @@ final class ExpressionSequenceBloc
     _lastSupportAt = null;
     _offSupportSince = null;
     _supportCapturing = false;
-    _aeLocked = false;
+    _aeLocked = carryAeLock && lockAeAwb;
+    carryAeLock = false;
     _finalizing = false;
     _lastObservation = null;
     _baselineSmile = 0;
@@ -163,7 +174,10 @@ final class ExpressionSequenceBloc
       return;
     }
     try {
-      await _recorder.startExpressionBuffer(directoryPath: dir);
+      await _recorder.startExpressionBuffer(
+        directoryPath: dir,
+        targetFps: targetFps,
+      );
     } on Object catch (e) {
       add(ExpressionSequenceFailed(e.toString()));
       return;
@@ -339,8 +353,9 @@ final class ExpressionSequenceBloc
       ),
     );
     try {
-      await _recorder.settleAndLockExpressionAeAwb();
-      _aeLocked = true;
+      // Reuses lockedLook when carried from 4-pose; otherwise settles fresh.
+      await _recorder.settleAndLockExpressionAeAwb(lockAeAwb: lockAeAwb);
+      _aeLocked = lockAeAwb;
     } on Object catch (e) {
       add(ExpressionSequenceFailed('Camera lock failed: $e'));
       return;
@@ -476,7 +491,7 @@ final class ExpressionSequenceBloc
     // Same ARKit video frame as the clip — no still-capture hitch.
     final StillCapture? still = await _recorder.captureStill(
       currentFrameOnly: true,
-      lockAeAwb: true,
+      lockAeAwb: lockAeAwb,
     );
     if (still == null || still.bytes.isEmpty) {
       throw StateError('captureStill returned empty');
@@ -758,7 +773,7 @@ final class ExpressionSequenceBloc
         // ARKit hi-res frame (same camera as the clip), not AVCapture pause.
         endStill = await _recorder.captureStill(
           hiRes: false,
-          lockAeAwb: true,
+          lockAeAwb: lockAeAwb,
         );
       }
     } on Object {

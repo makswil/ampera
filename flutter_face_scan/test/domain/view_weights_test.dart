@@ -128,4 +128,106 @@ void main() {
       expect(w[0], closeTo(1, 1e-6));
     });
   });
+
+  group('viewFacingCosine', () {
+    final Matrix4 view = Matrix4.translation(Vector3(0, 0, -5));
+    final Matrix4 face = Matrix4.identity();
+
+    test('head-on is 1, grazing is 0, backface is negative', () {
+      final List<double> nv = viewFacingCosine(
+        faceLocalVerts: <Vector3>[
+          Vector3.zero(),
+          Vector3.zero(),
+          Vector3.zero(),
+        ],
+        localNormals: <Vector3>[
+          Vector3(0, 0, 1),
+          Vector3(1, 0, 0),
+          Vector3(0, 0, -1),
+        ],
+        viewMatrix: view,
+        faceTransform: face,
+      );
+      expect(nv[0], closeTo(1, 1e-9));
+      expect(nv[1], closeTo(0, 1e-9));
+      expect(nv[2], closeTo(-1, 1e-9));
+    });
+  });
+
+  group('facingQuality', () {
+    test('bands match unseen / poor / good thresholds', () {
+      expect(facingQuality(0.19), FacingQuality.unseen);
+      expect(facingQuality(0.20), FacingQuality.poor);
+      expect(facingQuality(0.41), FacingQuality.poor);
+      expect(facingQuality(0.42), FacingQuality.good);
+      expect(facingQuality(1), FacingQuality.good);
+    });
+  });
+
+  group('facingFillHint', () {
+    test('keeps clip when frontal is good even if a side sees better', () {
+      expect(
+        facingFillHint(frontal: 0.5, left: 0.99),
+        FacingFillHint.clip,
+      );
+    });
+
+    test('picks the best support when clip is poor and support is better', () {
+      expect(
+        facingFillHint(frontal: 0.3, left: 0.4, right: 0.8, chinUp: 0.5),
+        FacingFillHint.right,
+      );
+    });
+
+    test('keeps poor clip when support n·v is worse', () {
+      expect(
+        facingFillHint(frontal: 0.35, left: 0.30, right: 0.28),
+        FacingFillHint.clip,
+      );
+    });
+
+    test('nobody when clip is unseen and support is also grazing', () {
+      expect(
+        facingFillHint(frontal: 0.1, left: 0.05, right: 0.19),
+        FacingFillHint.none,
+      );
+    });
+
+    test('chin-up wins on a lower-face hole', () {
+      expect(
+        facingFillHint(frontal: 0.05, left: 0.1, right: 0.1, chinUp: 0.7),
+        FacingFillHint.chinUp,
+      );
+    });
+  });
+
+  group('facingBestView', () {
+    test('side wins over a merely-good clip if it sees more head-on', () {
+      expect(
+        facingBestView(frontal: 0.5, left: 0.99),
+        FacingFillHint.left,
+      );
+    });
+
+    test('clip wins when it has the highest n·v', () {
+      expect(
+        facingBestView(frontal: 0.9, left: 0.4, right: 0.3, chinUp: 0.2),
+        FacingFillHint.clip,
+      );
+    });
+
+    test('clip keeps a tie', () {
+      expect(
+        facingBestView(frontal: 0.8, left: 0.8),
+        FacingFillHint.clip,
+      );
+    });
+
+    test('nobody when every pose is below minFacing', () {
+      expect(
+        facingBestView(frontal: 0.1, left: 0.05, right: 0.19),
+        FacingFillHint.none,
+      );
+    });
+  });
 }

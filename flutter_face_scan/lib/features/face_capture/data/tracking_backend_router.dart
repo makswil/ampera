@@ -38,7 +38,7 @@ final class TrackingBackendRouter implements FaceTrackingService {
 
   /// Stop current backend, select [next], do not auto-start.
   Future<void> select(TrackingBackend next) async {
-    if (_backend == next && !_running) {
+    if (_backend == next) {
       return;
     }
     await stop();
@@ -93,6 +93,7 @@ final class TrackingBackendRouter implements FaceTrackingService {
     bool hiRes = false,
     bool lockAeAwb = true,
     bool preferHarvestedVideoFrame = false,
+    bool currentFrameOnly = false,
   }) async {
     if (_backend == TrackingBackend.rear) {
       if (preferHarvestedVideoFrame) {
@@ -103,7 +104,12 @@ final class TrackingBackendRouter implements FaceTrackingService {
       }
       return rear.captureStill(lockAeAwb: lockAeAwb);
     }
-    return front.captureStill(hiRes: hiRes, lockAeAwb: lockAeAwb);
+    // Front: same ARKit session as expression clip (never AVCapture hi-res here).
+    return front.captureStill(
+      hiRes: hiRes,
+      lockAeAwb: lockAeAwb,
+      currentFrameOnly: currentFrameOnly,
+    );
   }
 
   Future<Uint8List?> previewFreeze() {

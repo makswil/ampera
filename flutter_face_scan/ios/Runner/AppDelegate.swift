@@ -120,8 +120,10 @@ enum FaceTrackingPlugin {
         manager.configureOverlay(showMesh: show, axisIndices: indices)
         result(nil)
       case "startExpressionBuffer":
-        let path = (call.arguments as? [String: Any])?["directoryPath"] as? String ?? ""
-        manager.startExpressionBuffer(directoryPath: path, result: result)
+        let args = call.arguments as? [String: Any]
+        let path = args?["directoryPath"] as? String ?? ""
+        let fps = (args?["targetFps"] as? NSNumber)?.intValue ?? 20
+        manager.startExpressionBuffer(directoryPath: path, targetFps: fps, result: result)
       case "markExpressionStart":
         let micros = (call.arguments as? [String: Any])?["startMicros"] as? NSNumber
         manager.markExpressionStart(startMicros: micros?.int64Value ?? 0)
@@ -136,8 +138,10 @@ enum FaceTrackingPlugin {
         manager.cancelExpressionBuffer()
         result(nil)
       case "settleAndLockExpressionAeAwb":
-        // Settle TrueDepth AE/AWB then lock for support stills + smile clip.
-        manager.settleAndLockExpressionAeAwb(result: result)
+        // Same settle+lock as 4-pose (TrueDepth in place; no second session).
+        let lockAeAwb =
+          (call.arguments as? [String: Any])?["lockAeAwb"] as? Bool ?? true
+        manager.settleAndLockExpressionAeAwb(lockAeAwb: lockAeAwb, result: result)
       case "unlockExpressionAeAwb":
         manager.unlockExpressionAeAwb(result: result)
       case "openAppSettings":
@@ -258,8 +262,8 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   private var activePhotoDelegate: PhotoCaptureDelegate?
   private let photoQueue = DispatchQueue(label: "flutter_face_scan.photo")
 
-  /// ISO / shutter / WB from the first settled hi-res shot; reused when
-  /// `lockAeAwb` is on so later poses don't re-auto and shift colour/exposure.
+  /// ISO / shutter / WB from TrueDepth settle (expression clip path); reused by
+  /// later 4-pose stills / hi-res when `lockAeAwb` is on.
   private var lockedLook: LockedCameraLook?
 
   /// Fires once when the first ARFrame arrives after resume (or on timeout).
@@ -274,7 +278,9 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   private var expressionFrameIndex = 0
   private var expressionFrames: [[String: Any]] = []
   private var expressionTopology: [String: Any]?
-  private let expressionSampleInterval: CFTimeInterval = 1.0 / 20.0
+  /// How often to keep a frame while buffering (Dev settings; default 20 fps).
+  private var expressionSampleInterval: CFTimeInterval = 1.0 / 20.0
+  private var expressionTargetFps: Int = 20
   private let expressionIoQueue = DispatchQueue(label: "flutter_face_scan.expression")
 
   private override init() {
@@ -286,7 +292,8 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   }
 
   func start() {
-    lockedLook = nil
+    // Keep lockedLook when restarting — 4-pose → expression continuity.
+    // Explicit unlock / stop clears it.
     guard ARFaceTrackingConfiguration.isSupported else {
       eventSink?(FlutterError(
         code: "unsupported",
@@ -505,9 +512,32 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
         // Resolve only after the first live AR frame so Flutter can flip UI safely.
         DispatchQueue.main.async {
           self.resumeSession()
-          self.whenPreviewLive {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-              result(payload ?? fallback)
+          // Hi-res photo session can drop the TrueDepth lock; put clip-style
+          // lockedLook back so later ARKit stills / poses stay colour-matched.
+          if let look = self.lockedLook {
+            self.photoQueue.async {
+              let device = self.photoDevice
+                ?? AVCaptureDevice.default(
+                  .builtInTrueDepthCamera,
+                  for: .video,
+                  position: .front
+                )
+              if let device {
+                self.applyLockedLook(look, on: device)
+              }
+              DispatchQueue.main.async {
+                self.whenPreviewLive {
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    result(payload ?? fallback)
+                  }
+                }
+              }
+            }
+          } else {
+            self.whenPreviewLive {
+              DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                result(payload ?? fallback)
+              }
             }
           }
         }
@@ -609,7 +639,12 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
   /// Must run on `photoQueue` with the photo session running.
   private func applyCameraLook(lockAeAwb: Bool) {
     guard let device = photoDevice else { return }
+    settleCameraLook(on: device, lockAeAwb: lockAeAwb)
+  }
 
+  /// Shared AE/AWB path for 4-pose hi-res stills and expression (TrueDepth).
+  /// Continuous auto → wait until settled → optional ISO/shutter/WB lock.
+  private func settleCameraLook(on device: AVCaptureDevice, lockAeAwb: Bool) {
     if lockAeAwb, let look = lockedLook {
       applyLockedLook(look, on: device)
       // Brief settle after forcing custom modes (device may still be adjusting).
@@ -617,7 +652,35 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       return
     }
 
-    // Continuous auto + wait until AE/AWB finish adjusting.
+    applyContinuousAuto(on: device)
+
+    Thread.sleep(forTimeInterval: 0.1) // kick adjustment
+    let deadline = Date().addingTimeInterval(0.8)
+    while Date() < deadline,
+          device.isAdjustingExposure || device.isAdjustingWhiteBalance {
+      Thread.sleep(forTimeInterval: 0.03)
+    }
+
+    guard lockAeAwb else { return }
+
+    // Snapshot settled values for later poses / clip frames.
+    let iso = device.iso
+    let duration = device.exposureDuration
+    let gains = device.deviceWhiteBalanceGains
+    let look = LockedCameraLook(iso: iso, duration: duration, gains: gains)
+    lockedLook = look
+    applyLockedLook(look, on: device)
+    faceScanDebugLog(
+      String(
+        format: "[face_scan] AE/AWB locked iso=%.0f duration=%.4fs gains=r%.2f g%.2f b%.2f",
+        iso,
+        CMTimeGetSeconds(duration),
+        gains.redGain, gains.greenGain, gains.blueGain
+      )
+    )
+  }
+
+  private func applyContinuousAuto(on device: AVCaptureDevice) {
     do {
       try device.lockForConfiguration()
       if device.isExposureModeSupported(.continuousAutoExposure) {
@@ -630,30 +693,6 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     } catch {
       faceScanDebugLog("[face_scan] AE/AWB auto config failed: \(error)")
     }
-
-    Thread.sleep(forTimeInterval: 0.1) // kick adjustment
-    let deadline = Date().addingTimeInterval(0.8)
-    while Date() < deadline,
-          device.isAdjustingExposure || device.isAdjustingWhiteBalance {
-      Thread.sleep(forTimeInterval: 0.03)
-    }
-
-    guard lockAeAwb else { return }
-
-    // Snapshot settled values for later poses (usually after frontal).
-    let iso = device.iso
-    let duration = device.exposureDuration
-    let gains = device.deviceWhiteBalanceGains
-    lockedLook = LockedCameraLook(iso: iso, duration: duration, gains: gains)
-    applyLockedLook(LockedCameraLook(iso: iso, duration: duration, gains: gains), on: device)
-    faceScanDebugLog(
-      String(
-        format: "[face_scan] AE/AWB locked iso=%.0f duration=%.4fs gains=r%.2f g%.2f b%.2f",
-        iso,
-        CMTimeGetSeconds(duration),
-        gains.redGain, gains.greenGain, gains.blueGain
-      )
-    )
   }
 
   private func applyLockedLook(_ look: LockedCameraLook, on device: AVCaptureDevice) {
@@ -879,7 +918,11 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
 
   // MARK: Expression sequence capture
 
-  func startExpressionBuffer(directoryPath: String, result: @escaping FlutterResult) {
+  func startExpressionBuffer(
+    directoryPath: String,
+    targetFps: Int,
+    result: @escaping FlutterResult
+  ) {
     guard faceScanIsShareablePath(directoryPath) else {
       result(FlutterError(
         code: "expression_dir",
@@ -902,6 +945,9 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       ))
       return
     }
+    let fps = max(1, min(60, targetFps))
+    expressionTargetFps = fps
+    expressionSampleInterval = 1.0 / CFTimeInterval(fps)
     expressionDir = dir
     expressionBuffering = true
     expressionStartMicros = nil
@@ -949,12 +995,16 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
     expressionFrameIndex = 0
   }
 
-  /// Settle front TrueDepth AE/AWB (same sensor ARKit uses) then lock for the
-  /// whole smile flow: support stills + clip frames stay colour-matched.
+  /// Same settle+lock as 4-pose (`settleCameraLook`) on the TrueDepth device
+  /// ARKit already owns. Must not start a second AVCapture session — that steals
+  /// the camera and freezes the mesh.
   ///
-  /// Must not `startRunning` a second AVCapture session — that steals TrueDepth
-  /// from ARKit and freezes the first (frontal) pose as a still.
-  func settleAndLockExpressionAeAwb(result: @escaping FlutterResult) {
+  /// If [lockedLook] is already set (e.g. after a preceding 4-pose scan), re-apply
+  /// it — do not settle fresh (that would change exposure between multipose and clip).
+  func settleAndLockExpressionAeAwb(
+    lockAeAwb: Bool,
+    result: @escaping FlutterResult
+  ) {
     photoQueue.async { [weak self] in
       guard let self else {
         DispatchQueue.main.async { result(nil) }
@@ -971,15 +1021,19 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
         return
       }
       self.photoDevice = device
-      self.lockedLook = nil
-      // aeSettle already held ~800ms on-target — snapshot and lock in place.
-      let look = LockedCameraLook(
-        iso: device.iso,
-        duration: device.exposureDuration,
-        gains: device.deviceWhiteBalanceGains
-      )
-      self.lockedLook = look
-      self.applyLockedLook(look, on: device)
+      if !lockAeAwb {
+        self.lockedLook = nil
+        self.applyContinuousAuto(on: device)
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      if let look = self.lockedLook {
+        self.applyLockedLook(look, on: device)
+        Thread.sleep(forTimeInterval: 0.05)
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+      self.settleCameraLook(on: device, lockAeAwb: true)
       DispatchQueue.main.async { result(nil) }
     }
   }
@@ -996,18 +1050,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
         for: .video,
         position: .front
       ) ?? self.photoDevice {
-        do {
-          try device.lockForConfiguration()
-          if device.isExposureModeSupported(.continuousAutoExposure) {
-            device.exposureMode = .continuousAutoExposure
-          }
-          if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-            device.whiteBalanceMode = .continuousAutoWhiteBalance
-          }
-          device.unlockForConfiguration()
-        } catch {
-          faceScanDebugLog("[face_scan] expression AE/AWB unlock failed: \(error)")
-        }
+        self.applyContinuousAuto(on: device)
       }
       DispatchQueue.main.async { result(nil) }
     }
@@ -1090,7 +1133,7 @@ final class FaceTrackingManager: NSObject, ARSCNViewDelegate, FlutterStreamHandl
       var manifest: [String: Any] = [
         "schemaVersion": 1,
         "frameCount": kept.count,
-        "targetFps": 20,
+        "targetFps": expressionTargetFps,
         "startMicros": NSNumber(value: startMicros),
         "endMicros": NSNumber(value: endCut),
         "frames": jsonFrames,
@@ -1594,12 +1637,30 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
   /// controller and flashed the default frontal view during clip playback.
   private let contentRoot = SCNNode()
   private let cameraNode = SCNNode()
-  /// Preloaded meshes for expression-sequence play (path → node).
-  private var meshCache: [String: SCNNode] = [:]
+  /// Single mesh node for expression clips (topology shared; verts+albedo swap).
+  private let morphNode = SCNNode()
   private var currentMesh: SCNNode?
   private var didFitCamera = false
-  /// Drops stale async loads when seeking faster than ModelIO (uncached only).
   private var loadGeneration = 0
+
+  // MARK: Sequence morph state (cheap verts in RAM, textures streamed)
+  private var sequencePaths: [String] = []
+  private var sequenceMode = false
+  private var sharedTexcoords: SCNGeometrySource?
+  private var sharedElement: SCNGeometryElement?
+  private var sharedMaterial: SCNMaterial?
+  private var vertsByPath: [String: Data] = [:]
+  private var vertexCount = 0
+  private var currentPath: String = ""
+  private let textureCacheLimit = 10
+  private var textureCache: [String: UIImage] = [:]
+  private var textureOrder: [String] = []
+  private let ioQueue = DispatchQueue(label: "flutter_face_scan.obj_morph", qos: .userInitiated)
+
+  // Fallback single-OBJ cache (non-sequence)
+  private let meshCacheLimit = 4
+  private var meshCache: [String: SCNNode] = [:]
+  private var meshCacheOrder: [String] = []
 
   init(
     frame: CGRect,
@@ -1616,8 +1677,6 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
     super.init()
     scnView.backgroundColor = Self.uiColor(argb: backgroundArgb) ?? .black
     scnView.allowsCameraControl = true
-    // Bake albedo already includes photo lighting; default lights + Lambert
-    // drew hard facets on mouth/eye fill tris.
     scnView.autoenablesDefaultLighting = false
     scnView.antialiasingMode = .multisampling4X
 
@@ -1628,9 +1687,6 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
     cameraNode.position = SCNVector3(0, 0, 0.35)
     scene.rootNode.addChildNode(cameraNode)
     scene.rootNode.addChildNode(contentRoot)
-    // Soft fill only — albedo already has photo lighting; strong omni + Lambert
-    // faceted the mouth-cap tris. Constant materials ignore lights; keep ambient
-    // in case a material falls back.
     let ambient = SCNNode()
     ambient.light = SCNLight()
     ambient.light?.type = .ambient
@@ -1661,46 +1717,114 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
       }
     }
 
-    // First frame — result ignored (creation-time load).
     setPath(objPath, result: { _ in })
+  }
+
+  deinit {
+    vertsByPath.removeAll(keepingCapacity: false)
+    textureCache.removeAll(keepingCapacity: false)
+    meshCache.removeAll(keepingCapacity: false)
   }
 
   func view() -> UIView {
     return scnView
   }
 
+  // MARK: - Flutter API
+
   private func preload(paths: [String], result: @escaping FlutterResult) {
-    // Resolve what's missing on the main thread (cache is main-owned).
-    // Keep caller order so the first frame can set the shared origin.
-    var missing: [String] = []
-    var seen = Set<String>()
-    for path in paths {
-      guard !seen.contains(path),
-            faceScanIsShareablePath(path),
-            meshCache[path] == nil,
-            FileManager.default.fileExists(atPath: path)
-      else { continue }
-      seen.insert(path)
-      missing.append(path)
-    }
-    if missing.isEmpty {
+    let unique = paths.filter { faceScanIsShareablePath($0) && FileManager.default.fileExists(atPath: $0) }
+    sequencePaths = unique
+    guard unique.count > 1, let first = unique.first else {
+      sequenceMode = false
       result(nil)
       return
     }
-    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-      var built: [String: SCNNode] = [:]
-      for path in missing {
-        built[path] = faceScanLoadObjMesh(objURL: URL(fileURLWithPath: path))
+
+    ioQueue.async { [weak self] in
+      guard let self else {
+        DispatchQueue.main.async { result(nil) }
+        return
       }
-      DispatchQueue.main.async {
-        guard let self else {
+      // Topology once from the first OBJ; verts for every frame (tiny).
+      guard let topo = faceScanParseObjTopology(URL(fileURLWithPath: first)),
+            !topo.uvs.isEmpty,
+            !topo.indices.isEmpty
+      else {
+        DispatchQueue.main.async {
+          self.sequenceMode = false
           result(nil)
-          return
         }
-        for path in missing {
-          guard let node = built[path] else { continue }
-          self.meshCache[path] = node
+        return
+      }
+
+      var vertsMap: [String: Data] = [:]
+      vertsMap.reserveCapacity(unique.count)
+      var expectedCount = 0
+      for path in unique {
+        if let data = faceScanLoadFrameVerts(objPath: path) {
+          if expectedCount == 0 {
+            expectedCount = data.count / MemoryLayout<Float>.size / 3
+          }
+          vertsMap[path] = data
         }
+      }
+
+      // Warm a few albedos so play doesn't stall on the first textures.
+      var warmTextures: [String: UIImage] = [:]
+      for path in unique.prefix(6) {
+        if let img = faceScanLoadAlbedo(forObjPath: path) {
+          warmTextures[path] = img
+        }
+      }
+
+      let texData = topo.uvs.withUnsafeBufferPointer { Data(buffer: $0) }
+      let texSource = SCNGeometrySource(
+        data: texData,
+        semantic: .texcoord,
+        vectorCount: topo.uvs.count / 2,
+        usesFloatComponents: true,
+        componentsPerVector: 2,
+        bytesPerComponent: MemoryLayout<Float>.size,
+        dataOffset: 0,
+        dataStride: MemoryLayout<Float>.size * 2
+      )
+      let indexData = topo.indices.withUnsafeBufferPointer { Data(buffer: $0) }
+      let element = SCNGeometryElement(
+        data: indexData,
+        primitiveType: .triangles,
+        primitiveCount: topo.indices.count / 3,
+        bytesPerIndex: MemoryLayout<UInt32>.size
+      )
+      let material = SCNMaterial()
+      material.lightingModel = .constant
+      material.isDoubleSided = true
+      material.specular.contents = UIColor.black
+      material.diffuse.wrapS = .clamp
+      material.diffuse.wrapT = .clamp
+      if let img = faceScanLoadAlbedo(forObjPath: first) {
+        material.diffuse.contents = img
+      }
+
+      DispatchQueue.main.async {
+        self.sequenceMode = true
+        self.sharedTexcoords = texSource
+        self.sharedElement = element
+        self.sharedMaterial = material
+        self.vertsByPath = vertsMap
+        self.vertexCount = expectedCount
+        self.textureCache.removeAll(keepingCapacity: false)
+        self.textureOrder.removeAll(keepingCapacity: false)
+        if let img = material.diffuse.contents as? UIImage {
+          self.cacheTexture(first, img)
+        }
+        for (path, img) in warmTextures {
+          self.cacheTexture(path, img)
+        }
+        // Drop heavy ModelIO mesh cache — morph node owns playback.
+        self.meshCache.removeAll(keepingCapacity: false)
+        self.meshCacheOrder.removeAll(keepingCapacity: false)
+        self.applyMorphFrame(first)
         result(nil)
       }
     }
@@ -1717,7 +1841,52 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
       return
     }
 
+    if sequenceMode,
+       sharedTexcoords != nil,
+       sharedElement != nil,
+       sharedMaterial != nil {
+      if vertsByPath[path] != nil {
+        applyMorphFrame(path)
+        prefetchSequence(around: path)
+        result(nil)
+        return
+      }
+      // Late verts load (preload still running or missing .verts).
+      loadGeneration += 1
+      let gen = loadGeneration
+      ioQueue.async { [weak self] in
+        let data = faceScanLoadFrameVerts(objPath: path)
+        let tex = faceScanLoadAlbedo(forObjPath: path)
+        DispatchQueue.main.async {
+          guard let self else {
+            result(nil)
+            return
+          }
+          if let data {
+            self.vertsByPath[path] = data
+            if self.vertexCount == 0 {
+              self.vertexCount = data.count / MemoryLayout<Float>.size / 3
+            }
+          }
+          if let tex {
+            self.cacheTexture(path, tex)
+          }
+          guard gen == self.loadGeneration else {
+            result(nil)
+            return
+          }
+          self.applyMorphFrame(path)
+          self.prefetchSequence(around: path)
+          result(nil)
+        }
+      }
+      return
+    }
+
+    // Single-model / non-morph fallback (ModelIO).
     if let cached = meshCache[path] {
+      touchMesh(path)
+      currentPath = path
       show(cached)
       result(nil)
       return
@@ -1733,21 +1902,137 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
           result(nil)
           return
         }
-        self.meshCache[path] = mesh
+        self.cacheMesh(path, mesh)
         guard gen == self.loadGeneration else {
-          // Superseded by a newer seek target; still report done so Dart
-          // can advance to the latest pending path.
           result(nil)
           return
         }
+        self.currentPath = path
         self.show(mesh)
         result(nil)
       }
     }
   }
 
+  // MARK: - Morph apply
+
+  private func applyMorphFrame(_ path: String) {
+    guard let texcoords = sharedTexcoords,
+          let element = sharedElement,
+          let material = sharedMaterial,
+          let vertsData = vertsByPath[path]
+    else { return }
+
+    let count = vertsData.count / MemoryLayout<Float>.size / 3
+    guard count > 0 else { return }
+
+    let vertexSource = SCNGeometrySource(
+      data: vertsData,
+      semantic: .vertex,
+      vectorCount: count,
+      usesFloatComponents: true,
+      componentsPerVector: 3,
+      bytesPerComponent: MemoryLayout<Float>.size,
+      dataOffset: 0,
+      dataStride: MemoryLayout<Float>.size * 3
+    )
+    let geometry = SCNGeometry(sources: [vertexSource, texcoords], elements: [element])
+    geometry.materials = [material]
+    morphNode.geometry = geometry
+
+    if let img = textureCache[path] {
+      material.diffuse.contents = img
+      touchTexture(path)
+    } else {
+      // Keep previous albedo until decode finishes (no flash to white).
+      ioQueue.async { [weak self] in
+        let img = faceScanLoadAlbedo(forObjPath: path)
+        DispatchQueue.main.async {
+          guard let self, let img else { return }
+          self.cacheTexture(path, img)
+          if self.currentPath == path {
+            self.sharedMaterial?.diffuse.contents = img
+          }
+        }
+      }
+    }
+
+    currentPath = path
+    if currentMesh !== morphNode {
+      show(morphNode)
+    } else if !didFitCamera {
+      fitCameraIfNeeded(for: morphNode)
+    }
+  }
+
+  private func prefetchSequence(around path: String) {
+    guard let idx = sequencePaths.firstIndex(of: path) else { return }
+    for offset in [1, 2, 3, -1] {
+      let i = idx + offset
+      guard sequencePaths.indices.contains(i) else { continue }
+      let neighbor = sequencePaths[i]
+      if textureCache[neighbor] == nil {
+        ioQueue.async { [weak self] in
+          guard let img = faceScanLoadAlbedo(forObjPath: neighbor) else { return }
+          DispatchQueue.main.async {
+            self?.cacheTexture(neighbor, img)
+          }
+        }
+      }
+      if vertsByPath[neighbor] == nil {
+        ioQueue.async { [weak self] in
+          guard let data = faceScanLoadFrameVerts(objPath: neighbor) else { return }
+          DispatchQueue.main.async {
+            self?.vertsByPath[neighbor] = data
+          }
+        }
+      }
+    }
+  }
+
+  // MARK: - Texture / mesh LRU
+
+  private func cacheTexture(_ path: String, _ image: UIImage) {
+    if textureCache[path] != nil {
+      touchTexture(path)
+      return
+    }
+    textureCache[path] = image
+    textureOrder.append(path)
+    while textureCache.count > textureCacheLimit {
+      guard let victim = textureOrder.first(where: { $0 != currentPath }) else { break }
+      textureOrder.removeAll { $0 == victim }
+      textureCache.removeValue(forKey: victim)
+    }
+  }
+
+  private func touchTexture(_ path: String) {
+    textureOrder.removeAll { $0 == path }
+    textureOrder.append(path)
+  }
+
+  private func cacheMesh(_ path: String, _ node: SCNNode) {
+    if meshCache[path] != nil {
+      touchMesh(path)
+      return
+    }
+    meshCache[path] = node
+    meshCacheOrder.append(path)
+    while meshCache.count > meshCacheLimit {
+      guard let victim = meshCacheOrder.first(where: { $0 != currentPath }) else { break }
+      meshCacheOrder.removeAll { $0 == victim }
+      meshCache.removeValue(forKey: victim)
+    }
+  }
+
+  private func touchMesh(_ path: String) {
+    meshCacheOrder.removeAll { $0 == path }
+    meshCacheOrder.append(path)
+  }
+
   private func show(_ mesh: SCNNode) {
     if currentMesh === mesh {
+      fitCameraIfNeeded(for: mesh)
       return
     }
     currentMesh?.removeFromParentNode()
@@ -1787,6 +2072,104 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
     let b = CGFloat(argb & 0xFF) / 255
     return UIColor(red: r, green: g, blue: b, alpha: a)
   }
+}
+
+// MARK: - Lightweight OBJ / verts helpers (sequence morph)
+
+private struct FaceScanObjTopology {
+  let uvs: [Float]
+  let indices: [UInt32]
+}
+
+/// Float32 xyz for one bake frame: prefers sibling `.verts`, else parses `v ` from OBJ.
+private func faceScanLoadFrameVerts(objPath: String) -> Data? {
+  let objURL = URL(fileURLWithPath: objPath)
+  let vertsURL = objURL.deletingPathExtension().appendingPathExtension("verts")
+  if let data = try? Data(contentsOf: vertsURL), data.count >= 12, data.count % 12 == 0 {
+    return data
+  }
+  return faceScanParseObjVertices(objURL)
+}
+
+private func faceScanParseObjVertices(_ objURL: URL) -> Data? {
+  guard let text = try? String(contentsOf: objURL, encoding: .utf8) else { return nil }
+  var floats: [Float] = []
+  floats.reserveCapacity(4096)
+  text.enumerateLines { line, _ in
+    guard line.hasPrefix("v ") else { return }
+    let parts = line.split(whereSeparator: { $0.isWhitespace })
+    guard parts.count >= 4,
+          let x = Float(parts[1]),
+          let y = Float(parts[2]),
+          let z = Float(parts[3])
+    else { return }
+    floats.append(x)
+    floats.append(y)
+    floats.append(z)
+  }
+  guard floats.count >= 9 else { return nil }
+  return floats.withUnsafeBufferPointer { Data(buffer: $0) }
+}
+
+private func faceScanParseObjTopology(_ objURL: URL) -> FaceScanObjTopology? {
+  guard let text = try? String(contentsOf: objURL, encoding: .utf8) else { return nil }
+  var uvs: [Float] = []
+  var indices: [UInt32] = []
+  uvs.reserveCapacity(4096)
+  indices.reserveCapacity(8192)
+  text.enumerateLines { line, _ in
+    if line.hasPrefix("vt ") {
+      let parts = line.split(whereSeparator: { $0.isWhitespace })
+      guard parts.count >= 3,
+            let u = Float(parts[1]),
+            let v = Float(parts[2])
+      else { return }
+      // OBJ vt is bottom-left; SceneKit + UIImage sample top-left. Bake writes
+      // `vt u (1-v)` for OBJ tools — undo that flip for the morph viewer.
+      uvs.append(u)
+      uvs.append(1 - v)
+      return
+    }
+    guard line.hasPrefix("f ") else { return }
+    let parts = line.split(whereSeparator: { $0.isWhitespace })
+    guard parts.count >= 4 else { return }
+    // Triangulate fans; face refs are v/vt[/vn] with 1-based indices.
+    var face: [UInt32] = []
+    face.reserveCapacity(parts.count - 1)
+    for i in 1..<parts.count {
+      let token = parts[i]
+      let vertToken = token.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first
+      guard let vertToken,
+            let idx = Int(vertToken),
+            idx > 0
+      else { return }
+      face.append(UInt32(idx - 1))
+    }
+    guard face.count >= 3 else { return }
+    for t in 1..<(face.count - 1) {
+      indices.append(face[0])
+      indices.append(face[t])
+      indices.append(face[t + 1])
+    }
+  }
+  guard !uvs.isEmpty, !indices.isEmpty else { return nil }
+  return FaceScanObjTopology(uvs: uvs, indices: indices)
+}
+
+private func faceScanLoadAlbedo(forObjPath objPath: String) -> UIImage? {
+  let objURL = URL(fileURLWithPath: objPath)
+  let dir = objURL.deletingLastPathComponent()
+  let stem = objURL.deletingPathExtension().lastPathComponent
+  let mtlMaps = faceScanMtlMaps(from: dir.appendingPathComponent("\(stem).mtl"))
+  let candidates = [mtlMaps.albedo, "\(stem).png"].compactMap { $0 }
+  for name in candidates {
+    guard !name.isEmpty, !name.contains("/"), !name.contains("\\") else { continue }
+    let url = dir.appendingPathComponent(name)
+    if let img = UIImage(contentsOfFile: url.path) {
+      return img
+    }
+  }
+  return nil
 }
 
 /// Reads `map_Kd` / `map_Kn` from a Wavefront MTL (basename only).

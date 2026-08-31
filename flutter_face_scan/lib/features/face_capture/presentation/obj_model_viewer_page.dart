@@ -16,9 +16,9 @@ import 'widgets/camera_corner_frame.dart';
 /// App bar, hints, and navigation are Flutter; mesh rendering is SceneKit via
 /// [UiKitView] (same pattern as the live camera preview).
 ///
-/// When [sequenceObjPaths] is set, frames are **preloaded** into a native scene
-/// cache so slider + play can swap meshes instantly (per-frame ModelIO reload
-/// made play jump straight to the last frame).
+/// Expression clips use a native **morph** path: shared topology, all vertex
+/// buffers in RAM (~KB/frame), and a small texture ring — not full ModelIO
+/// meshes per frame (that OOMed / stuttered at 100+ frames).
 class ObjModelViewerPage extends StatefulWidget {
   const ObjModelViewerPage({
     required this.objPath,
@@ -154,8 +154,8 @@ class _ObjModelViewerPageState extends State<ObjModelViewerPage> {
       _setFrame(0);
     }
     setState(() => _playing = true);
-    // ~20 fps — matches smile-clip capture rate; cache swaps are cheap.
-    _playTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+    // ~30 fps playback; native morph swaps verts+albedo without ModelIO.
+    _playTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
       if (!mounted || !_playing) {
         return;
       }
