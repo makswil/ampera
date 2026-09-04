@@ -219,7 +219,7 @@ abstract final class FacingDebugAtlas {
         'good': <String, Object?>{
           'min': kFacingGoodMin,
           'color': '#28c85a',
-          'angleFromHeadOnDeg': 65,
+          'angleFromHeadOnDeg': 60,
           'meaning':
               'Clip sees this head-on enough. L/R / chin-up should stay out.',
         },
@@ -227,9 +227,9 @@ abstract final class FacingDebugAtlas {
           'min': kDefaultMinFacing,
           'max': kFacingGoodMin,
           'color': '#ff8c00',
-          'angleFromHeadOnDeg': <int>[65, 78],
+          'angleFromHeadOnDeg': <int>[60, 78],
           'meaning':
-              'Clip still sees it, but grazing (~65–78°). Stretched if used. Candidate for L/R or chin-up.',
+              'Clip still sees it, but grazing (~60–78°). Stretched if used. Candidate for L/R or chin-up.',
         },
         'unseen': <String, Object?>{
           'max': kDefaultMinFacing,
@@ -242,8 +242,8 @@ abstract final class FacingDebugAtlas {
       'thresholdsWhy': <String, String>{
         '0.20':
             'kDefaultMinFacing — bake discards samples below this as grazing stretch (cos 78°).',
-        '0.42':
-            'kFacingGoodMin — previous clip-only hole cutoff (cos 65°). Below this the frontal JPEG smears.',
+        '0.50':
+            'kFacingGoodMin — clip-only cutoff (cos 60°). Below this the frontal JPEG smears (grey stripe).',
       },
       'panels': <String, String>{
         'tl': 'clip classified (green=good, orange=poor, black=unseen)',
@@ -254,7 +254,7 @@ abstract final class FacingDebugAtlas {
       },
       'bestViewPng': 'debug_nv_best.png',
       'bestView':
-          'Argmax n·v per vertex. Green=clip, red=left, blue=right, yellow=chin-up, magenta=nobody (all < 0.20). Unlike suggested-fill, clip does not win just for being ≥ 0.42.',
+          'Argmax n·v per vertex. Green=clip, red=left, blue=right, yellow=chin-up, magenta=nobody (all < 0.20). Unlike suggested-fill, clip does not win just for being ≥ 0.50.',
       'bestViewColors': <String, String>{
         'clip': '#28c85a',
         'left': '#eb3746',

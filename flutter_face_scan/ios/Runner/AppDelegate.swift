@@ -1662,6 +1662,17 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
   private var meshCache: [String: SCNNode] = [:]
   private var meshCacheOrder: [String] = []
 
+  // Dev source-paint overlay (vertex dots + brush). Hidden unless Flutter enables it.
+  private var paintEnabled = false
+  private var paintBrush: UInt8 = 1
+  private var paintLabels: [UInt8] = []
+  private let paintRoot = SCNNode()
+  private var paintDots: [SCNNode] = []
+  private var paintMaterials: [SCNMaterial] = []
+  private var paintPan: UIPanGestureRecognizer?
+  private var paintTap: UITapGestureRecognizer?
+  private let paintBrushRadius: Float = 0.011
+
   init(
     frame: CGRect,
     viewId: Int64,
@@ -1687,6 +1698,20 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
     cameraNode.position = SCNVector3(0, 0, 0.35)
     scene.rootNode.addChildNode(cameraNode)
     scene.rootNode.addChildNode(contentRoot)
+    paintRoot.name = "sourcePaint"
+    paintRoot.isHidden = true
+    paintRoot.categoryBitMask = 2
+    contentRoot.addChildNode(paintRoot)
+    paintMaterials = Self.makePaintMaterials()
+    let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePaintPan(_:)))
+    pan.maximumNumberOfTouches = 1
+    pan.isEnabled = false
+    scnView.addGestureRecognizer(pan)
+    paintPan = pan
+    let tap = UITapGestureRecognizer(target: self, action: #selector(handlePaintTap(_:)))
+    tap.isEnabled = false
+    scnView.addGestureRecognizer(tap)
+    paintTap = tap
     let ambient = SCNNode()
     ambient.light = SCNLight()
     ambient.light?.type = .ambient
@@ -1712,6 +1737,20 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
         let path =
           (call.arguments as? [String: Any])?["path"] as? String ?? ""
         self.setPath(path, result: result)
+      case "setPaintEnabled":
+        let on = (call.arguments as? [String: Any])?["enabled"] as? Bool ?? false
+        self.setPaintEnabled(on)
+        result(nil)
+      case "setPaintBrush":
+        let raw = (call.arguments as? [String: Any])?["brush"] as? NSNumber
+        self.paintBrush = UInt8(truncating: raw ?? 1)
+        result(nil)
+      case "setPaintLabels":
+        self.applyPaintLabelsArgument(call.arguments)
+        result(nil)
+      case "clearPaint":
+        self.clearPaint()
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -1958,11 +1997,13 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
     }
 
     currentPath = path
+    morphNode.categoryBitMask = 1
     if currentMesh !== morphNode {
       show(morphNode)
     } else if !didFitCamera {
       fitCameraIfNeeded(for: morphNode)
     }
+    refreshPaintOverlay()
   }
 
   private func prefetchSequence(around path: String) {
@@ -2038,7 +2079,9 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
     currentMesh?.removeFromParentNode()
     contentRoot.addChildNode(mesh)
     currentMesh = mesh
+    mesh.categoryBitMask = 1
     fitCameraIfNeeded(for: mesh)
+    refreshPaintOverlay()
   }
 
   /// Place the camera once from the first mesh. Later clip frames share
@@ -2062,6 +2105,192 @@ final class ObjModelPreviewView: NSObject, FlutterPlatformView {
     cameraNode.position = SCNVector3(0, 0, max(radius * 2.2, 0.35))
     scnView.defaultCameraController.target = SCNVector3Zero
     didFitCamera = true
+  }
+
+  // MARK: - Source paint
+
+  private func setPaintEnabled(_ on: Bool) {
+    paintEnabled = on
+    scnView.allowsCameraControl = !on
+    paintPan?.isEnabled = on
+    paintTap?.isEnabled = on
+    paintRoot.isHidden = !on
+    if on {
+      refreshPaintOverlay()
+    }
+  }
+
+  private func applyPaintLabelsArgument(_ arguments: Any?) {
+    let map = arguments as? [String: Any]
+    if let typed = map?["labels"] as? FlutterStandardTypedData {
+      setPaintLabelsData(typed.data)
+      return
+    }
+    if let list = map?["labels"] as? [NSNumber] {
+      paintLabels = list.map { UInt8(truncating: $0) }
+      recolorPaintDots()
+    }
+  }
+
+  private func setPaintLabelsData(_ data: Data) {
+    paintLabels = [UInt8](data)
+    recolorPaintDots()
+  }
+
+  private func clearPaint() {
+    for i in paintLabels.indices {
+      paintLabels[i] = 0
+    }
+    recolorPaintDots()
+    emitPaintChanged()
+  }
+
+  private func refreshPaintOverlay() {
+    guard paintEnabled, let verts = currentPaintVerts() else { return }
+    let count = verts.count / MemoryLayout<Float>.size / 3
+    guard count > 0 else { return }
+    ensurePaintDots(count: count)
+    if paintLabels.count != count {
+      var next = [UInt8](repeating: 0, count: count)
+      for i in 0..<min(paintLabels.count, count) {
+        next[i] = paintLabels[i]
+      }
+      paintLabels = next
+    }
+    verts.withUnsafeBytes { raw in
+      guard let ptr = raw.bindMemory(to: Float.self).baseAddress else { return }
+      for i in 0..<count {
+        paintDots[i].position = SCNVector3(ptr[i * 3], ptr[i * 3 + 1], ptr[i * 3 + 2])
+      }
+    }
+    recolorPaintDots()
+  }
+
+  private func currentPaintVerts() -> Data? {
+    if let data = vertsByPath[currentPath] {
+      return data
+    }
+    if !currentPath.isEmpty {
+      return faceScanLoadFrameVerts(objPath: currentPath)
+    }
+    return nil
+  }
+
+  private func ensurePaintDots(count: Int) {
+    if paintDots.count == count {
+      return
+    }
+    paintDots.forEach { $0.removeFromParentNode() }
+    paintDots.removeAll(keepingCapacity: false)
+    paintDots.reserveCapacity(count)
+    for _ in 0..<count {
+      let sphere = SCNSphere(radius: 0.0007)
+      sphere.segmentCount = 6
+      sphere.firstMaterial = paintMaterials[0]
+      let node = SCNNode(geometry: sphere)
+      node.categoryBitMask = 2
+      paintRoot.addChildNode(node)
+      paintDots.append(node)
+    }
+  }
+
+  private func recolorPaintDots() {
+    let n = min(paintDots.count, paintLabels.count)
+    for i in 0..<n {
+      let idx = Int(paintLabels[i])
+      let mat = paintMaterials[min(max(idx, 0), paintMaterials.count - 1)]
+      paintDots[i].geometry?.firstMaterial = mat
+    }
+  }
+
+  @objc private func handlePaintPan(_ gesture: UIPanGestureRecognizer) {
+    guard paintEnabled else { return }
+    paintAt(gesture.location(in: scnView))
+    if gesture.state == .ended || gesture.state == .cancelled {
+      emitPaintChanged()
+    }
+  }
+
+  @objc private func handlePaintTap(_ gesture: UITapGestureRecognizer) {
+    guard paintEnabled else { return }
+    paintAt(gesture.location(in: scnView))
+    emitPaintChanged()
+  }
+
+  private func paintAt(_ point: CGPoint) {
+    let hits = scnView.hitTest(point, options: [
+      .categoryBitMask: 1,
+      .searchMode: SCNHitTestSearchMode.closest.rawValue,
+    ])
+    guard let hit = hits.first else { return }
+    let local = contentRoot.convertPosition(hit.worldCoordinates, from: nil)
+    guard let verts = currentPaintVerts() else { return }
+    let count = verts.count / MemoryLayout<Float>.size / 3
+    guard count > 0 else { return }
+    ensurePaintDots(count: count)
+    if paintLabels.count != count {
+      paintLabels = [UInt8](repeating: 0, count: count)
+    }
+    let r2 = paintBrushRadius * paintBrushRadius
+    var best = -1
+    var bestD: Float = .greatestFiniteMagnitude
+    var painted = false
+    verts.withUnsafeBytes { raw in
+      guard let ptr = raw.bindMemory(to: Float.self).baseAddress else { return }
+      for i in 0..<count {
+        let dx = ptr[i * 3] - local.x
+        let dy = ptr[i * 3 + 1] - local.y
+        let dz = ptr[i * 3 + 2] - local.z
+        let d2 = dx * dx + dy * dy + dz * dz
+        if d2 < bestD {
+          bestD = d2
+          best = i
+        }
+        if d2 <= r2 {
+          setPaintLabel(i, paintBrush)
+          painted = true
+        }
+      }
+    }
+    if !painted && best >= 0 {
+      setPaintLabel(best, paintBrush)
+    }
+  }
+
+  private func setPaintLabel(_ i: Int, _ label: UInt8) {
+    guard i >= 0 && i < paintLabels.count && i < paintDots.count else { return }
+    paintLabels[i] = label
+    let idx = Int(label)
+    paintDots[i].geometry?.firstMaterial =
+      paintMaterials[min(max(idx, 0), paintMaterials.count - 1)]
+  }
+
+  private func emitPaintChanged() {
+    let data = Data(paintLabels)
+    channel.invokeMethod(
+      "paintChanged",
+      arguments: ["labels": FlutterStandardTypedData(bytes: data)]
+    )
+  }
+
+  private static func makePaintMaterials() -> [SCNMaterial] {
+    let colors: [UIColor] = [
+      UIColor(white: 0.95, alpha: 0.28),
+      UIColor(red: 0.16, green: 0.78, blue: 0.35, alpha: 1),
+      UIColor(red: 0.92, green: 0.22, blue: 0.22, alpha: 1),
+      UIColor(red: 0.18, green: 0.42, blue: 0.98, alpha: 1),
+      UIColor(red: 0.98, green: 0.82, blue: 0.16, alpha: 1),
+    ]
+    return colors.enumerated().map { index, color in
+      let m = SCNMaterial()
+      m.lightingModel = .constant
+      m.diffuse.contents = color
+      m.emission.contents = color
+      m.isDoubleSided = true
+      m.writesToDepthBuffer = index != 0
+      m.blendMode = .alpha
+      return m
+    }
   }
 
   private static func uiColor(argb: UInt32?) -> UIColor? {

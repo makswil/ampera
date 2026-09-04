@@ -159,7 +159,8 @@ void main() {
       expect(facingQuality(0.19), FacingQuality.unseen);
       expect(facingQuality(0.20), FacingQuality.poor);
       expect(facingQuality(0.41), FacingQuality.poor);
-      expect(facingQuality(0.42), FacingQuality.good);
+      expect(facingQuality(0.42), FacingQuality.poor);
+      expect(facingQuality(0.50), FacingQuality.good);
       expect(facingQuality(1), FacingQuality.good);
     });
   });
@@ -167,8 +168,15 @@ void main() {
   group('facingFillHint', () {
     test('keeps clip when frontal is good even if a side sees better', () {
       expect(
-        facingFillHint(frontal: 0.5, left: 0.99),
+        facingFillHint(frontal: 0.6, left: 0.99),
         FacingFillHint.clip,
+      );
+    });
+
+    test('poor clip just under 0.50 yields to a stronger side', () {
+      expect(
+        facingFillHint(frontal: 0.45, left: 0.9),
+        FacingFillHint.left,
       );
     });
 

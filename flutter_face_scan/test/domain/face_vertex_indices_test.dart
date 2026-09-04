@@ -81,6 +81,34 @@ void main() {
       expect(FaceHoleGeometry.eyeVertexIndices, containsAll(<int>[1061, 1084]));
     });
 
+    test('brow extras are unique and outside the eye apertures', () {
+      final Set<int> brows = FaceHoleGeometry.browVertexIndices.toSet();
+      expect(brows.length, FaceHoleGeometry.browVertexIndices.length);
+      expect(
+        brows.intersection(FaceHoleGeometry.eyeVertexIndices),
+        isEmpty,
+      );
+      expect(brows, containsAll(<int>[46, 132, 198, 581, 649, 1126, 1177]));
+      expect(brows, isNot(contains(1046)));
+    });
+
+    test('clip and L/R boundary verts are disjoint', () {
+      final Set<int> clip = FaceHoleGeometry.browVertexIndices.toSet();
+      final Set<int> left = FaceHoleGeometry.browLeftVertexIndices.toSet();
+      final Set<int> right = FaceHoleGeometry.browRightVertexIndices.toSet();
+      expect(left.length, FaceHoleGeometry.browLeftVertexIndices.length);
+      expect(right.length, FaceHoleGeometry.browRightVertexIndices.length);
+      expect(clip.intersection(left), isEmpty);
+      expect(clip.intersection(right), isEmpty);
+      expect(left.intersection(right), isEmpty);
+      expect(
+        left.union(right).intersection(FaceHoleGeometry.eyeVertexIndices),
+        isEmpty,
+      );
+      expect(left, containsAll(<int>[475, 1023]));
+      expect(right, containsAll(<int>[891, 1046]));
+    });
+
     test('mouthVertexIndices match outline (closed loop unique)', () {
       expect(
         FaceHoleGeometry.mouthVertexIndices,

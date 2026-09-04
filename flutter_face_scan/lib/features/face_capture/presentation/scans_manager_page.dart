@@ -112,6 +112,7 @@ class _ScansManagerPageState extends State<ScansManagerPage> {
           title: entry.consumerTitle,
           subtitle: entry.expression.productLabel,
           sequenceObjPaths: sequence,
+          isDev: _isDev,
         ),
       ),
     );

@@ -53,6 +53,58 @@ void main() {
     return (r: -1, g: -1, b: -1);
   }
 
+  test('stitch triangle eases luma toward the darker pose, not a grey RGB mix',
+      () {
+    final List<WeightedPose> stitch = <WeightedPose>[
+      WeightedPose(
+        pose: _pose(_solid(200, 200, 200)),
+        weight: <double>[1, 0, 0],
+      ),
+      WeightedPose(
+        pose: _pose(_solid(100, 100, 100)),
+        weight: <double>[0, 1, 1],
+      ),
+    ];
+    final img.Image out = const TextureBaker().bakeViewDependent(
+      poses: stitch,
+      uvs: uvs,
+      triangles: triangles,
+      textureSize: 8,
+      blend: false,
+    );
+    final img.Pixel p = out.getPixel(2, 2);
+    final int y = p.r.toInt();
+    expect(y, greaterThan(100));
+    expect(y, lessThan(200));
+    expect(p.g.toInt(), closeTo(y, 2));
+    expect(p.b.toInt(), closeTo(y, 2));
+  });
+
+  test('skipStitchLerpVertices keeps winner-only on a mouth/brow triangle', () {
+    final List<WeightedPose> stitch = <WeightedPose>[
+      WeightedPose(
+        pose: _pose(_solid(200, 200, 200)),
+        weight: <double>[1, 0, 0],
+      ),
+      WeightedPose(
+        pose: _pose(_solid(100, 100, 100)),
+        weight: <double>[0, 1, 1],
+      ),
+    ];
+    final img.Image out = const TextureBaker().bakeViewDependent(
+      poses: stitch,
+      uvs: uvs,
+      triangles: triangles,
+      textureSize: 8,
+      blend: false,
+      skipStitchLerpVertices: const <int>{0},
+    );
+    final img.Pixel p = out.getPixel(2, 2);
+    expect(p.r.toInt(), anyOf(100, 200));
+    expect(p.g.toInt(), p.r.toInt());
+    expect(p.b.toInt(), p.r.toInt());
+  });
+
   test('best-only takes the single highest-weight pose (pure red, no mix)', () {
     final img.Image out = const TextureBaker().bakeViewDependent(
       poses: poses,

@@ -1034,7 +1034,8 @@ class _CapturePageState extends State<CapturePage> {
             SwitchListTile(
               title: const Text('ml-wb (expression clip)'),
               subtitle: const Text(
-                'Default off — many frames. Enable to A/B (console timing).',
+                'Default off — all clip frames (slow). L/R/Kinn stills are '
+                'always matched to one clip frame.',
               ),
               value: _debug.mlWbExpression,
               onChanged: (bool v) => _debug.mlWbExpression = v,
@@ -1077,7 +1078,8 @@ class _CapturePageState extends State<CapturePage> {
         SwitchListTile(
           title: const Text('ml-wb (expression clip)'),
           subtitle: const Text(
-            'Default off. White-balance every expression-clip frame before bake. '
+            'Default off. White-balance every expression-clip frame (slow). '
+            'L/R/Kinn stills are always matched to one clip frame. '
             'Generate again to apply.',
           ),
           value: _debug.mlWbExpression,
@@ -1492,6 +1494,7 @@ class _CapturePageState extends State<CapturePage> {
             title: title,
             subtitle: subtitle,
             sequenceObjPaths: sequenceObjPaths,
+            isDev: _debug.isDev,
           ),
         ),
       );

@@ -149,6 +149,10 @@ final class TextureBaker {
   /// rasterized from the first pose only — side stills cannot bleed an iris
   /// through barycentric mix at the lid/cheek boundary.
   ///
+  /// [skipStitchLerpVertices]: triangles that touch this set keep winner-only
+  /// colour (no clip↔support RGB lerp). Mouth / brows — mixing smile with a
+  /// rest still warps the feature.
+  ///
   /// [debugTint]: 0 = normal (or solid [WeightedPose.debugRgb] if set).
   /// (0,1] = sample the photo, then lerp toward each pose's [debugRgb]
   /// (skin still readable; strong colour filter for source maps).
@@ -162,6 +166,7 @@ final class TextureBaker {
     List<int> solidFillRgb = const <int>[12, 8, 8],
     Set<int>? screenSpaceFrontalVertices,
     Set<int>? frontalOnlyVertices,
+    Set<int>? skipStitchLerpVertices,
     double debugTint = 0,
   }) {
     final img.Image out = img.Image(
@@ -243,6 +248,10 @@ final class TextureBaker {
         );
         continue;
       }
+      final bool allowStitchLerp = skipStitchLerpVertices == null ||
+          !(skipStitchLerpVertices.contains(a) ||
+              skipStitchLerpVertices.contains(b) ||
+              skipStitchLerpVertices.contains(c));
       _rasterizeViewDependent(
         out,
         poses,
@@ -255,6 +264,7 @@ final class TextureBaker {
         textureSize,
         blend,
         debugTint,
+        allowStitchLerp,
       );
     }
 
@@ -472,6 +482,7 @@ final class TextureBaker {
     int size,
     bool blend, [
     double debugTint = 0,
+    bool allowStitchLerp = true,
   ]) {
     final int minX = math.max(0, _floor3(uvA.x, uvB.x, uvC.x));
     final int maxX = math.min(size - 1, _ceil3(uvA.x, uvB.x, uvC.x));
@@ -531,20 +542,55 @@ final class TextureBaker {
             );
           }
         } else {
-          // Best-only: highest-weight pose that yields a sample (no mixing →
-          // full sharpness). Ties/misses fall through to the next best.
+          // Best-only interior. Only triangles whose verts disagree on the
+          // winner (the clip↔support stitch) lerp RGB — never the L/R fill.
+          int argMax(List<double> wv) {
+            int b = 0;
+            for (int i = 1; i < wv.length; i++) {
+              if (wv[i] > wv[b]) {
+                b = i;
+              }
+            }
+            return b;
+          }
+
+          final bool stitchTri =
+              argMax(wA) != argMax(wB) || argMax(wB) != argMax(wC);
+
+          _Rgb? bestColour;
+          _Rgb? secondColour;
           double bestW = 0;
+          double secondW = 0;
           for (int i = 0; i < n; i++) {
             final double w = bc.x * wA[i] + bc.y * wB[i] + bc.z * wC[i];
-            if (w <= bestW) {
+            if (w <= 0) {
               continue;
             }
             final _Rgb? s = _poseSample(poses[i], bc, a, b, c, debugTint);
             if (s == null) {
               continue;
             }
-            bestW = w;
-            colour = _applyGain(s, poses[i].gain);
+            final _Rgb gained = _applyGain(s, poses[i].gain);
+            if (w > bestW) {
+              secondW = bestW;
+              secondColour = bestColour;
+              bestW = w;
+              bestColour = gained;
+            } else if (w > secondW) {
+              secondW = w;
+              secondColour = gained;
+            }
+          }
+          if (allowStitchLerp &&
+              stitchTri &&
+              bestColour != null &&
+              secondColour != null &&
+              secondW > 0 &&
+              bestW > 0) {
+            final double t = secondW / (bestW + secondW);
+            colour = _lerp(bestColour, secondColour, t * 0.55);
+          } else {
+            colour = bestColour;
           }
         }
 

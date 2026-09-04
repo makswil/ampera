@@ -178,6 +178,33 @@ abstract final class FaceHoleGeometry {
   /// Unique verts on the eye apertures (rims + caps).
   static final Set<int> eyeVertexIndices = Set<int>.unmodifiable(eyeTriangles);
 
+  /// Brows / brow tails. Forced clip so L/R stills cannot double/offset them.
+  /// These verts *are* the clip boundary — do not ring-expand past them.
+  /// Adjacent L/R boundary verts may sit on the next vertex.
+  static const List<int> browVertexIndices = <int>[
+    46, 56, 131, 132, 161, 162, 163, 164, 165, 166, 197, 198, 199, 200, 201,
+    207, 209, 210, 211, 219, 220, 224, 225, 226, 227, 228, 229, 230, 231, 232,
+    234, 235, 326, 327, 328, 333, 334, 335, 353, 355, 375, 388, 415, 417, 418,
+    419, 474, 503, 505, 581, 601, 602, 604, 610, 611, 612, 613, 614, 615, 627,
+    646, 647, 648, 649, 650, 657, 658, 659, 660, 662, 663, 664, 665, 669, 670,
+    761, 762, 763, 766, 767, 768, 784, 785, 786, 806, 808, 819, 820, 821, 845,
+    848, 849, 875, 879, 883, 889, 890, 952, 953, 960, 961, 1017, 1018, 1035,
+    1036, 1126, 1127, 1128, 1129, 1130, 1131, 1132, 1133, 1134, 1135, 1136,
+    1152, 1153, 1154, 1155, 1156, 1177,
+  ];
+
+  /// Outer brow / temple verts forced to the left support still.
+  static const List<int> browLeftVertexIndices = <int>[
+    178, 390, 456, 457, 458, 459, 463, 465, 466, 468, 469, 470, 471, 472, 473,
+    475, 940, 1023,
+  ];
+
+  /// Outer brow / temple verts forced to the right support still.
+  static const List<int> browRightVertexIndices = <int>[
+    885, 886, 891, 896, 897, 898, 899, 1010, 1011, 1027, 1028, 1029, 1030,
+    1042, 1043, 1044, 1046,
+  ];
+
   /// Mouth aperture fill, 34 triangles, flat `[a,b,c, …]`.
   static const List<int> mouthTriangles = <int>[
     249, 393, 404,

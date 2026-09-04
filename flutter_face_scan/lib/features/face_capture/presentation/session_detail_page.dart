@@ -100,6 +100,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
                     for (final ExpressionSequenceBakedFrame f in baked.frames)
                       f.objPath,
                   ],
+                  isDev: _isDev,
                 ),
               ),
             );
@@ -114,6 +115,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
                   objPath: baked.objPath,
                   title: widget.entry.consumerTitle,
                   subtitle: widget.entry.expression.productLabel,
+                  isDev: _isDev,
                 ),
               ),
             );
@@ -194,6 +196,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
             title: widget.entry.consumerTitle,
             subtitle: widget.entry.expression.productLabel,
             sequenceObjPaths: sequence,
+            isDev: _isDev,
           ),
         ),
       );

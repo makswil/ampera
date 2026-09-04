@@ -9,6 +9,7 @@ import 'package:vector_math/vector_math_64.dart';
 
 import '../../domain/constants/face_regions.g.dart';
 import '../../domain/constants/face_vertex_indices.dart';
+import '../../domain/v3/source_paint.dart';
 import '../../domain/v3/texture_projection.dart';
 import '../../domain/v3/vertex_motion.dart';
 import '../../domain/v3/vertex_normals.dart';
@@ -53,10 +54,11 @@ final class ExpressionSequenceBakeResult {
 }
 
 /// Bakes each expression frame. One photo per vertex — no RGB mix of smile
-/// and neutral. Clip JPEG where it sees the surface head-on (`n·v` ≥ 0.42)
+/// and neutral. Clip JPEG where it sees the surface head-on (`n·v` ≥ 0.50)
 /// or the mesh moved. L/R / chin-up only where the clip is grazing/blind,
-/// the vertex stayed still, and that still saw the point. Does not change
-/// 4-pose bake.
+/// the vertex stayed still, and that still saw the point. Per texel the
+/// highest-weight pose wins (no average in the stitch triangle). Does not
+/// change 4-pose bake.
 final class ExpressionSequenceBaker {
   const ExpressionSequenceBaker();
 
@@ -65,7 +67,8 @@ final class ExpressionSequenceBaker {
     int textureSize = 1024,
     /// Match multipose: author eye + mouth cap tris so ARKit apertures aren't holes.
     bool fillHoles = true,
-    /// Match Side→Clip RGB over still-region overlap (lighting seams).
+    /// Match L/R/chin cheek mean RGB to clip cheek on that side (not the brow
+    /// seam). Does not blend photos.
     bool colorMatch = true,
     /// Paint source colours instead of photos (clip JPEG = green).
     bool debugSourceColors = false,
@@ -103,6 +106,11 @@ final class ExpressionSequenceBaker {
         ? <int>[...triangles, ...FaceHoleGeometry.holeTriangles]
         : triangles;
 
+    final List<int> paintLabels =
+        (await SourcePaintMap.load(File('${exprDir.path}/${SourcePaintMap.fileName}')))
+            ?.labels ??
+        const <int>[];
+
     final Directory outDir = Directory('${exprDir.path}/baked');
     if (outDir.existsSync()) {
       await outDir.delete(recursive: true);
@@ -113,9 +121,21 @@ final class ExpressionSequenceBaker {
         <ExpressionSequenceBakedFrame>[];
     const TextureBaker baker = TextureBaker();
 
-    final BakePose? leftCheek = await _loadSupport(exprDir, stem: 'right40');
-    final BakePose? rightCheek = await _loadSupport(exprDir, stem: 'left40');
-    final BakePose? chinUp = await _loadSupport(exprDir, stem: 'up');
+    final BakePose? leftCheek = await _loadSupport(
+      exprDir,
+      stem: 'right40',
+      jpegOverrides: jpegOverrides,
+    );
+    final BakePose? rightCheek = await _loadSupport(
+      exprDir,
+      stem: 'left40',
+      jpegOverrides: jpegOverrides,
+    );
+    final BakePose? chinUp = await _loadSupport(
+      exprDir,
+      stem: 'up',
+      jpegOverrides: jpegOverrides,
+    );
 
     // Load frames first so we can repair ARKit nose-collapse outliers (1–3
     // frames where the tip jumps short while isTracked stays true).
@@ -196,6 +216,7 @@ final class ExpressionSequenceBaker {
         chinUp: chinUp,
         normals: normals,
         allowSupport: allowSupport,
+        paintLabels: paintLabels,
         uvs: uvs,
         triangles: meshTriangles,
         textureSize: textureSize,
@@ -273,6 +294,8 @@ final class ExpressionSequenceBaker {
       },
       'mixSupportStills':
           leftCheek != null || rightCheek != null || chinUp != null,
+      if (paintLabels.isNotEmpty)
+        'sourcePaint': SourcePaintMap(paintLabels).toJson(),
       'debugNv': <String, String>{
         'png': 'debug_nv.png',
         'bestPng': 'debug_nv_best.png',
@@ -395,6 +418,7 @@ final class ExpressionSequenceBaker {
     required BakePose? chinUp,
     required List<Vector3> normals,
     required List<double> allowSupport,
+    required List<int> paintLabels,
     required List<double> uvs,
     required List<int> triangles,
     required int textureSize,
@@ -414,7 +438,7 @@ final class ExpressionSequenceBaker {
         uvs: uvs,
         triangles: triangles,
         textureSize: textureSize,
-        blend: true,
+        blend: false,
         screenSpaceFrontalVertices: FaceHoleGeometry.eyeVertexIndices,
         debugTint: debugSourceColors ? 0.78 : 0,
       );
@@ -489,20 +513,6 @@ final class ExpressionSequenceBaker {
       ?rightCheek,
       ?chinUp,
     ];
-    // Gain from geometric overlap (both cameras see the point), then exclusive
-    // pick — otherwise poseGain has no overlap samples.
-    final List<List<double>> gains = _poseGains(
-      baker: baker,
-      poses: ordered,
-      weights: <List<double>>[
-        clipNv,
-        ?leftNv,
-        ?rightNv,
-        ?chinNv,
-      ],
-      colorMatch: colorMatch,
-      luminanceOnly: true,
-    );
 
     assignExpressionExclusiveWeights(
       wFrontal: wFrontal,
@@ -523,18 +533,75 @@ final class ExpressionSequenceBaker {
       ?wChin,
     ];
 
-    final Set<int> periocular = expandVertexRings(
+    final Set<int> lids = expandVertexRings(
       seeds: FaceHoleGeometry.eyeVertexIndices,
       triangles: triangles,
-      rings: 2,
+      rings: 1,
     );
     pinVerticesToFrontalPose(
       weights: weights,
       frontalVerts: frontal.vertices,
       vertices: <int>[
-        ...periocular,
+        ...lids,
         ...FaceHoleGeometry.mouthVertexIndices,
       ],
+    );
+    applySourcePaintToWeights(
+      labels: expressionDefaultSourceLabels(n),
+      wFrontal: wFrontal,
+      wLeft: wLeft,
+      wRight: wRight,
+      wChin: wChin,
+    );
+    if (paintLabels.isNotEmpty) {
+      final List<Vector3> pairVerts =
+          leftCheek?.vertices ?? rightCheek?.vertices ?? frontal.vertices;
+      applySourcePaintToWeights(
+        labels: expandSourcePaintLabels(
+          labels: harmonizeSourcePaintLabels(
+            labels: paintLabels,
+            verts: pairVerts,
+            midlineX: frame.midlineX,
+          ),
+          triangles: triangles,
+          rings: 0,
+        ),
+        wFrontal: wFrontal,
+        wLeft: wLeft,
+        wRight: wRight,
+        wChin: wChin,
+      );
+    }
+
+    // Recolor each support still so its cheek skin mean matches clip cheek
+    // skin on that side — not the brow seam (hair/shadow there was driving
+    // the gain for the whole L/R JPEG).
+    final List<int> winner = expressionExclusiveWinner(
+      wFrontal: wFrontal,
+      wLeft: wLeft,
+      wRight: wRight,
+      wChin: wChin,
+    );
+    final Set<int> skipSkin = lids
+        .union(FaceHoleGeometry.mouthVertexIndices)
+        .union(FaceHoleGeometry.browVertexIndices.toSet())
+        .union(FaceHoleGeometry.browLeftVertexIndices.toSet())
+        .union(FaceHoleGeometry.browRightVertexIndices.toSet());
+    final List<List<double>> gains = _supportCheekGains(
+      baker: baker,
+      clip: frontal,
+      winner: winner,
+      clipNv: clipNv,
+      verts: frontal.vertices,
+      frame: frame,
+      skip: skipSkin,
+      colorMatch: colorMatch,
+      left: leftCheek,
+      leftNv: leftNv,
+      right: rightCheek,
+      rightNv: rightNv,
+      chin: chinUp,
+      chinNv: chinNv,
     );
 
     return baker.bakeViewDependent(
@@ -550,35 +617,90 @@ final class ExpressionSequenceBaker {
       uvs: uvs,
       triangles: triangles,
       textureSize: textureSize,
-      blend: true,
+      blend: false,
       screenSpaceFrontalVertices: FaceHoleGeometry.eyeVertexIndices,
-      frontalOnlyVertices: periocular,
+      // Lids only — not brows. A triangle that merely touches a brow vert
+      // must not become clip-only out to its L/R corners.
+      frontalOnlyVertices: lids,
+      skipStitchLerpVertices: FaceHoleGeometry.mouthVertexIndices
+          .union(FaceHoleGeometry.browVertexIndices.toSet())
+          .union(FaceHoleGeometry.browLeftVertexIndices.toSet())
+          .union(FaceHoleGeometry.browRightVertexIndices.toSet()),
       debugTint: debugSourceColors ? 0.78 : 0,
     );
   }
 
-  static List<List<double>> _poseGains({
+  /// Per-support RGB gain: mean clip cheek ÷ mean support cheek on that side.
+  /// Clip stays identity. Missing stills are omitted (caller aligns with
+  /// [ordered] = clip, then left?, right?, chin?).
+  static List<List<double>> _supportCheekGains({
     required TextureBaker baker,
-    required List<BakePose> poses,
-    required List<List<double>> weights,
+    required BakePose clip,
+    required List<int> winner,
+    required List<double> clipNv,
+    required List<Vector3> verts,
+    required FaceGuardFrame frame,
+    required Set<int> skip,
     required bool colorMatch,
-    bool luminanceOnly = false,
+    BakePose? left,
+    List<double>? leftNv,
+    BakePose? right,
+    List<double>? rightNv,
+    BakePose? chin,
+    List<double>? chinNv,
   }) {
     const List<double> identity = <double>[1, 1, 1];
-    if (!colorMatch || poses.length < 2) {
-      return <List<double>>[for (int i = 0; i < poses.length; i++) identity];
+    List<double> one({
+      required BakePose pose,
+      required int supportId,
+      required List<double> supportNv,
+      required int side,
+    }) {
+      if (!colorMatch) {
+        return identity;
+      }
+      final List<double>? clipMean = baker.poseMeanColor(
+        pose: clip,
+        weight: expressionSkinMatchWeights(
+          winner: winner,
+          keepWinner: 0,
+          facingNv: clipNv,
+          verts: verts,
+          frame: frame,
+          skip: skip,
+          side: side,
+        ),
+        minSamples: 12,
+      );
+      final List<double>? supportMean = baker.poseMeanColor(
+        pose: pose,
+        weight: expressionSkinMatchWeights(
+          winner: winner,
+          keepWinner: supportId,
+          facingNv: supportNv,
+          verts: verts,
+          frame: frame,
+          skip: skip,
+          side: side,
+        ),
+        minSamples: 12,
+      );
+      if (clipMean == null || supportMean == null) {
+        return identity;
+      }
+      return TextureBaker.gainToTarget(supportMean, clipMean);
     }
-    final List<double> wFrontal = weights[0];
+
     return <List<double>>[
       identity,
-      for (int i = 1; i < poses.length; i++)
-        baker.poseGain(
-          reference: poses[0],
-          pose: poses[i],
-          refWeight: wFrontal,
-          poseWeight: weights[i],
-          luminanceOnly: luminanceOnly,
-        ),
+      if (left != null && leftNv != null)
+        one(pose: left, supportId: 1, supportNv: leftNv, side: 1),
+      if (right != null && rightNv != null)
+        one(pose: right, supportId: 2, supportNv: rightNv, side: 2),
+      // 2026-09-04: L/R cheek mean match helps in places; chin-up regions
+      // look clearly worse (jaw/beard pulled toward clip flush). Keep
+      // chin identity until it has its own mask — do not reuse cheek gain.
+      if (chin != null && chinNv != null) identity,
     ];
   }
 
@@ -716,6 +838,7 @@ final class ExpressionSequenceBaker {
   static Future<BakePose?> _loadSupport(
     Directory exprDir, {
     required String stem,
+    Map<String, Uint8List>? jpegOverrides,
   }) async {
     final Directory support = Directory('${exprDir.path}/support');
     final File metaFile = File('${support.path}/$stem.json');
@@ -730,7 +853,9 @@ final class ExpressionSequenceBaker {
     if (decoded is! Map<String, dynamic>) {
       return null;
     }
-    final img.Image? image = img.decodeJpg(await jpgFile.readAsBytes());
+    final Uint8List jpegBytes =
+        jpegOverrides?['$stem.jpg'] ?? await jpgFile.readAsBytes();
+    final img.Image? image = img.decodeJpg(jpegBytes);
     if (image == null) {
       return null;
     }
@@ -785,6 +910,312 @@ final class ExpressionSequenceBaker {
         if (e is num) e.toDouble(),
     ];
   }
+}
+
+/// Winner pose index per vertex after exclusive assign: 0 clip, 1 left, 2 right,
+/// 3 chin-up. Ties keep the first (clip).
+List<int> expressionExclusiveWinner({
+  required List<double> wFrontal,
+  List<double>? wLeft,
+  List<double>? wRight,
+  List<double>? wChin,
+}) {
+  final int n = wFrontal.length;
+  final List<int> out = List<int>.filled(n, 0);
+  for (int i = 0; i < n; i++) {
+    double best = wFrontal[i];
+    int w = 0;
+    void consider(List<double>? src, int id) {
+      if (src == null || i >= src.length) {
+        return;
+      }
+      if (src[i] > best) {
+        best = src[i];
+        w = id;
+      }
+    }
+
+    consider(wLeft, 1);
+    consider(wRight, 2);
+    consider(wChin, 3);
+    out[i] = w;
+  }
+  return out;
+}
+
+/// Optionally spreads each non-auto paint label to neighbouring verts.
+/// Default [rings] is 0 — bake uses exactly the painted verts (2 rings ate
+/// forehead / temple past the visible dots). Does not overwrite a different
+/// paint.
+List<int> expandSourcePaintLabels({
+  required List<int> labels,
+  required List<int> triangles,
+  int rings = 0,
+}) {
+  final int n = labels.length;
+  final List<int> out = List<int>.from(labels);
+  for (int lab = 1; lab < SourcePaintLabel.values.length; lab++) {
+    final List<int> seeds = <int>[
+      for (int i = 0; i < n; i++)
+        if (labels[i] == lab) i,
+    ];
+    if (seeds.isEmpty) {
+      continue;
+    }
+    final Set<int> expanded = expandVertexRings(
+      seeds: seeds,
+      triangles: triangles,
+      rings: rings,
+    );
+    for (final int i in expanded) {
+      if (i >= 0 && i < n && out[i] == SourcePaintLabel.auto.index) {
+        out[i] = lab;
+      }
+    }
+  }
+  return out;
+}
+
+/// Left↔right partner for each vertex (face-local X reflected across
+/// [midlineX]). Midline verts and unmatched verts map to themselves.
+List<int> faceMirrorIndex(
+  List<Vector3> verts, {
+  double midlineX = 0,
+  double maxDist = 0.008,
+}) {
+  final int n = verts.length;
+  final List<int> out = List<int>.generate(n, (int i) => i);
+  if (n == 0) {
+    return out;
+  }
+  final double maxD2 = maxDist * maxDist;
+  final List<bool> used = List<bool>.filled(n, false);
+  const double midBand = 0.002;
+  final List<int> order = List<int>.generate(n, (int i) => i)
+    ..sort((int a, int b) {
+      final double da = (verts[a].x - midlineX).abs();
+      final double db = (verts[b].x - midlineX).abs();
+      return db.compareTo(da);
+    });
+  for (final int i in order) {
+    if (used[i]) {
+      continue;
+    }
+    if ((verts[i].x - midlineX).abs() < midBand) {
+      out[i] = i;
+      used[i] = true;
+      continue;
+    }
+    final Vector3 target = Vector3(
+      2 * midlineX - verts[i].x,
+      verts[i].y,
+      verts[i].z,
+    );
+    int best = -1;
+    double bestD2 = maxD2;
+    for (int j = 0; j < n; j++) {
+      if (j == i || used[j]) {
+        continue;
+      }
+      final double d2 = (verts[j] - target).length2;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = j;
+      }
+    }
+    if (best < 0) {
+      out[i] = i;
+      used[i] = true;
+      continue;
+    }
+    out[i] = best;
+    out[best] = i;
+    used[i] = true;
+    used[best] = true;
+  }
+  return out;
+}
+
+/// Puts L/R paint on the matching anatomical side, then copies each non-auto
+/// label onto its auto mirror (L↔R, clip→clip, chin→chin). Does not overwrite
+/// a different painted label.
+List<int> harmonizeSourcePaintLabels({
+  required List<int> labels,
+  required List<Vector3> verts,
+  required double midlineX,
+}) {
+  final int n = labels.length < verts.length ? labels.length : verts.length;
+  final List<int> out = List<int>.from(labels);
+  final int auto = SourcePaintLabel.auto.index;
+  final int left = SourcePaintLabel.left.index;
+  final int right = SourcePaintLabel.right.index;
+  for (int i = 0; i < n; i++) {
+    final int lab = out[i];
+    if (lab != left && lab != right) {
+      continue;
+    }
+    final double dx = verts[i].x - midlineX;
+    if (lab == left && dx > 1e-4) {
+      out[i] = right;
+    } else if (lab == right && dx < -1e-4) {
+      out[i] = left;
+    }
+  }
+  final List<int> mirror = faceMirrorIndex(verts, midlineX: midlineX);
+  int opposite(int lab) {
+    if (lab == left) {
+      return right;
+    }
+    if (lab == right) {
+      return left;
+    }
+    return lab;
+  }
+
+  for (int i = 0; i < n && i < mirror.length; i++) {
+    final int lab = out[i];
+    if (lab == auto) {
+      continue;
+    }
+    final int j = mirror[i];
+    if (j < 0 || j >= out.length || j == i) {
+      continue;
+    }
+    if (out[j] == auto) {
+      out[j] = opposite(lab);
+    }
+  }
+  return out;
+}
+
+/// Cheek-skin sample mask for colour-matching a support still to clip.
+///
+/// [keepWinner] 0 = clip-owned skin (the target), 1/2/3 = that support's fill
+/// (the source). [side] 1 = left, 2 = right, 3 = chin. Drops eyes/mouth/brows
+/// via [skip], grazing samples, the nose, and forehead / beard so the gain
+/// is driven by adjacent cheek skin — not the brow seam.
+List<double> expressionSkinMatchWeights({
+  required List<int> winner,
+  required int keepWinner,
+  required List<double> facingNv,
+  required List<Vector3> verts,
+  required FaceGuardFrame frame,
+  required Set<int> skip,
+  required int side,
+  double minFacing = kFacingGoodMin,
+}) {
+  final int n = winner.length;
+  final List<double> out = List<double>.filled(n, 0);
+  final double half = frame.halfSpan > 1e-6 ? frame.halfSpan : 1.0;
+  final ({double forehead, double chin}) ys =
+      _expressionForeheadChinY(verts, frame);
+  final double span = ys.forehead - ys.chin;
+  for (int i = 0; i < n; i++) {
+    if (winner[i] != keepWinner) {
+      continue;
+    }
+    if (skip.contains(i)) {
+      continue;
+    }
+    if (i >= facingNv.length || facingNv[i] < minFacing) {
+      continue;
+    }
+    if (i >= verts.length) {
+      continue;
+    }
+    final Vector3 v = verts[i];
+    if (side == 1 && v.x > frame.midlineX) {
+      continue;
+    }
+    if (side == 2 && v.x < frame.midlineX) {
+      continue;
+    }
+    final double t = span.abs() < 1e-6 ? 0.5 : (v.y - ys.chin) / span;
+    if (side == 3) {
+      if (t > 0.48) {
+        continue;
+      }
+    } else {
+      final double lateral = (v.x - frame.midlineX).abs() / half;
+      if (lateral < 0.12) {
+        continue;
+      }
+      if (t > 0.72 || t < 0.26) {
+        continue;
+      }
+    }
+    out[i] = 1;
+  }
+  return out;
+}
+
+({double forehead, double chin}) _expressionForeheadChinY(
+  List<Vector3> verts,
+  FaceGuardFrame frame,
+) {
+  final int fi = FaceSymmetryAxis.foreheadVertex;
+  final int ci = FaceSymmetryAxis.chinVertex;
+  double forehead;
+  double chin;
+  if (fi < verts.length && ci < verts.length) {
+    forehead = verts[fi].y;
+    chin = verts[ci].y;
+  } else {
+    // Short meshes (tests): vertical span ≈ face half-width about midY.
+    forehead = frame.midY + frame.halfSpan;
+    chin = frame.midY - frame.halfSpan;
+  }
+  if (chin > forehead) {
+    final double swap = chin;
+    chin = forehead;
+    forehead = swap;
+  }
+  return (forehead: forehead, chin: chin);
+}
+
+/// 1 on vertices of triangles that mix clip (0) with [supportWinner], plus
+/// one-ring neighbours so [TextureBaker.poseGain] has enough samples.
+List<double> expressionStitchBandWeights({
+  required List<int> winner,
+  required int supportWinner,
+  required List<int> triangles,
+  int expandRings = 1,
+}) {
+  final int n = winner.length;
+  final Set<int> band = <int>{};
+  for (int t = 0; t + 2 < triangles.length; t += 3) {
+    final int a = triangles[t];
+    final int b = triangles[t + 1];
+    final int c = triangles[t + 2];
+    if (a < 0 || b < 0 || c < 0 || a >= n || b >= n || c >= n) {
+      continue;
+    }
+    final int wa = winner[a];
+    final int wb = winner[b];
+    final int wc = winner[c];
+    final bool hasClip = wa == 0 || wb == 0 || wc == 0;
+    final bool hasSupport =
+        wa == supportWinner || wb == supportWinner || wc == supportWinner;
+    if (hasClip && hasSupport) {
+      band.add(a);
+      band.add(b);
+      band.add(c);
+    }
+  }
+  final Set<int> expanded = expandRings > 0
+      ? expandVertexRings(
+          seeds: band,
+          triangles: triangles,
+          rings: expandRings,
+        )
+      : band;
+  final List<double> out = List<double>.filled(n, 0);
+  for (final int i in expanded) {
+    if (i >= 0 && i < n) {
+      out[i] = 1;
+    }
+  }
+  return out;
 }
 
 /// Exclusive 0/1 source pick for the expression bake. Clip keeps the vertex

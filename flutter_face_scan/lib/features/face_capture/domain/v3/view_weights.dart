@@ -27,9 +27,10 @@ const double kDefaultFacingExponent = 3;
 const double kDefaultMinFacing = 0.2;
 
 /// Minimum raw `n·v` to treat a clip sample as **good** (sharp enough to keep).
-/// `cos(65°) ≈ 0.42`. Between [kDefaultMinFacing] and this the clip still sees
-/// the point, but at a grazing angle that smears albedo (**poor**).
-const double kFacingGoodMin = 0.42;
+/// `cos(60°) = 0.50`. Between [kDefaultMinFacing] and this the clip still sees
+/// the point, but at a grazing angle that smears albedo (**poor**) — the grey
+/// stripe at the clip↔L/R join when the threshold was 0.42 (`cos 65°`).
+const double kFacingGoodMin = 0.50;
 
 /// Discrete clip-visibility band from raw `n·v` (not the cubed bake weight).
 enum FacingQuality {

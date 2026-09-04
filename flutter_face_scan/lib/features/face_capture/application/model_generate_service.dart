@@ -159,18 +159,37 @@ final class ModelGenerateService extends ChangeNotifier {
       Map<String, Uint8List>? jpegOverrides;
       String? mlWbNote;
       int? mlWbMs;
+      final Stopwatch mlSw = Stopwatch()..start();
+
+      // Cheap: L/R/chin-up → Kelvin of one clip frame. Not the 55+ clip JPEGs.
+      if (correctWhiteBalance != null) {
+        final ({Map<String, Uint8List>? overrides, String note}) support =
+            await prepareExpressionSupportMlWb(
+          manifestPath: manifestPath,
+          correct: correctWhiteBalance,
+        );
+        jpegOverrides = support.overrides;
+        mlWbNote = support.note;
+      }
 
       if (mlWb && correctWhiteBalance != null) {
-        final Stopwatch mlSw = Stopwatch()..start();
-        final ({Map<String, Uint8List>? overrides, String note}) prepared =
+        final ({Map<String, Uint8List>? overrides, String note}) clip =
             await prepareExpressionMlWb(
           manifestPath: manifestPath,
           matchFrontal: mlWbMatchFrontal,
           correct: correctWhiteBalance,
         );
+        jpegOverrides = <String, Uint8List>{
+          ...?jpegOverrides,
+          ...?clip.overrides,
+        };
+        mlWbNote = <String>[
+          if (mlWbNote != null && mlWbNote.isNotEmpty) mlWbNote,
+          clip.note,
+        ].join(' · ');
+      }
+      if (mlWbNote != null) {
         mlWbMs = mlSw.elapsedMilliseconds;
-        jpegOverrides = prepared.overrides;
-        mlWbNote = prepared.note;
       }
 
       final Stopwatch bakeSw = Stopwatch()..start();
@@ -290,5 +309,90 @@ Future<({Map<String, Uint8List>? overrides, String note})>
     overrides: overrides,
     note: 'ml-wb OK → ${result.targetKelvin.round()} K ($mode) · '
         '${names.length} frames$timing',
+  );
+}
+
+/// Matches L/R/chin-up support stills to the Kelvin of **one** clip frame.
+/// Leaves clip JPEGs raw (same AE/AWB lock; 55+ frames stay untouched).
+Future<({Map<String, Uint8List>? overrides, String note})>
+    prepareExpressionSupportMlWb({
+  required String manifestPath,
+  required ModelGenerateWbCorrector correct,
+}) async {
+  final File manifestFile = File(manifestPath);
+  if (!manifestFile.existsSync()) {
+    return (overrides: null, note: 'ml-wb support: no manifest');
+  }
+  final Object? decoded = jsonDecode(await manifestFile.readAsString());
+  if (decoded is! Map<String, dynamic>) {
+    return (overrides: null, note: 'ml-wb support: bad manifest');
+  }
+  final Directory exprDir = manifestFile.parent;
+  final List<dynamic> rawFrames =
+      decoded['frames'] as List<dynamic>? ?? const <dynamic>[];
+  String? clipName;
+  for (final dynamic raw in rawFrames) {
+    if (raw is! Map<String, dynamic>) {
+      continue;
+    }
+    final String jpgName = raw['jpg'] as String? ?? '';
+    if (jpgName.isEmpty) {
+      continue;
+    }
+    final File? jpgFile = SessionPath.fileUnderRoot(exprDir, jpgName);
+    if (jpgFile != null && jpgFile.existsSync()) {
+      clipName = jpgName;
+      break;
+    }
+  }
+  if (clipName == null) {
+    return (overrides: null, note: 'ml-wb support: no clip frame');
+  }
+  final File? clipFile = SessionPath.fileUnderRoot(exprDir, clipName);
+  if (clipFile == null) {
+    return (overrides: null, note: 'ml-wb support: no clip frame');
+  }
+
+  const List<String> stems = <String>['right40', 'left40', 'up'];
+  final List<String> supportNames = <String>[];
+  final List<Uint8List> inputs = <Uint8List>[await clipFile.readAsBytes()];
+  final Directory supportDir = Directory('${exprDir.path}/support');
+  for (final String stem in stems) {
+    final File jpg = File('${supportDir.path}/$stem.jpg');
+    if (!jpg.existsSync()) {
+      continue;
+    }
+    supportNames.add('$stem.jpg');
+    inputs.add(await jpg.readAsBytes());
+  }
+  if (supportNames.isEmpty) {
+    return (overrides: null, note: 'ml-wb support: no stills');
+  }
+
+  final WhiteBalanceCorrection? result = await correct(
+    jpegs: inputs,
+    matchFrontal: true,
+    targetKelvin: CaptureDefaults.neutralKelvin,
+  );
+  if (result == null ||
+      !result.ok ||
+      result.jpegs.length != inputs.length) {
+    return (
+      overrides: null,
+      note: 'ml-wb support FAILED (${result?.error ?? 'no response'})'
+          '${result?.timingSummary != null ? ' · ${result!.timingSummary}' : ''}',
+    );
+  }
+
+  final Map<String, Uint8List> overrides = <String, Uint8List>{
+    for (int i = 0; i < supportNames.length; i++)
+      supportNames[i]: result.jpegs[i + 1],
+  };
+  final String timing =
+      result.timingSummary != null ? ' · ${result.timingSummary}' : '';
+  return (
+    overrides: overrides,
+    note: 'ml-wb support → clip K (${result.targetKelvin.round()} K) · '
+        '${supportNames.length} stills$timing',
   );
 }

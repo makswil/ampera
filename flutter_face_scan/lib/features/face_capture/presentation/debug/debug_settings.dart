@@ -151,8 +151,9 @@ class DebugSettings extends ChangeNotifier {
   /// Default on. Expression clip uses [mlWbExpression] instead.
   bool get mlWb => _mlWb;
 
-  /// On-device ml-wb before **expression-clip** Generate. Default off (55+ frames
-  /// is expensive — enable in Dev settings to A/B).
+  /// On-device ml-wb before **every expression-clip frame**. Default off
+  /// (55+ frames). L/R/chin-up stills are always matched to one clip frame
+  /// even when this is off.
   bool get mlWbExpression => _mlWbExpression;
 
   /// Only when [mlWb] / [mlWbExpression] is on: `true` = all inputs → frontal
