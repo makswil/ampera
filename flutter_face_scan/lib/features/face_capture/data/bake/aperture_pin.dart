@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:vector_math/vector_math_64.dart';
 
 /// Zero non-frontal pose weights on [vertices] (+ optional hard halo).
@@ -7,8 +8,7 @@ import 'package:vector_math/vector_math_64.dart';
 /// Side stills capture a different gaze, so blending them into the eye *holes*
 /// ghosts a second iris. Pin the aperture verts only — a periocular halo
 /// stamps lids / lashes / dark circles as a hard island that crawls as the
-/// expression mesh deforms. Use [fadeNonFrontalNearSeeds] for lid-margin
-/// ghosting instead. Mutates [weights] in place; `[0]` is frontal.
+/// expression mesh deforms. Mutates [weights] in place; `[0]` is frontal.
 void pinVerticesToFrontalPose({
   required List<List<double>> weights,
   required List<Vector3> frontalVerts,
@@ -125,6 +125,9 @@ Set<int> expandVertexRings({
 ///
 /// Default radii: kill on the rim, full side contribution by ~5 mm (inside the
 /// eyelid, short of the tear trough).
+///
+/// Kept for unit tests; production bake uses [pinVerticesToFrontalPose].
+@visibleForTesting
 void fadeNonFrontalNearSeeds({
   required List<List<double>> weights,
   required List<Vector3> verts,
