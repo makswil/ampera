@@ -2,8 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 import 'package:vector_math/vector_math_64.dart';
 
@@ -76,6 +76,13 @@ final class ExpressionSequenceBaker {
     /// When set, overrides the on-disk file for that frame.
     Map<String, Uint8List>? jpegOverrides,
   }) async {
+    if (!SessionPath.isExpressionSequenceManifestPath(manifestPath)) {
+      throw ArgumentError.value(
+        manifestPath,
+        'manifestPath',
+        'must be under face_scans/<id>/expression/sequence.json',
+      );
+    }
     final File manifestFile = File(manifestPath);
     if (!manifestFile.existsSync()) {
       throw StateError('expression bake: missing manifest at $manifestPath');
@@ -85,6 +92,12 @@ final class ExpressionSequenceBaker {
       throw StateError('expression bake: manifest is not a JSON object');
     }
     final Directory exprDir = manifestFile.parent;
+    if (!SessionPath.isUnderFaceScansTree(exprDir.path)) {
+      throw StateError(
+        'expression bake: expression dir escapes face_scans tree '
+        '(${exprDir.path})',
+      );
+    }
     final List<dynamic> rawFrames =
         decoded['frames'] as List<dynamic>? ?? const <dynamic>[];
     final List<int> triangles = _intList(decoded['triangleIndices']);
@@ -106,12 +119,19 @@ final class ExpressionSequenceBaker {
         ? <int>[...triangles, ...FaceHoleGeometry.holeTriangles]
         : triangles;
 
-    final List<int> paintLabels =
-        (await SourcePaintMap.load(File('${exprDir.path}/${SourcePaintMap.fileName}')))
-            ?.labels ??
-        const <int>[];
+    final File? paintFile =
+        SessionPath.fileUnderRoot(exprDir, SourcePaintMap.fileName);
+    final List<int> paintLabels = paintFile == null
+        ? const <int>[]
+        : (await SourcePaintMap.load(paintFile))?.labels ?? const <int>[];
 
     final Directory outDir = Directory('${exprDir.path}/baked');
+    if (!SessionPath.isUnderFaceScansTree(outDir.path)) {
+      throw StateError(
+        'expression bake: refused to write outside face_scans '
+        '(${outDir.path})',
+      );
+    }
     if (outDir.existsSync()) {
       await outDir.delete(recursive: true);
     }
@@ -840,11 +860,16 @@ final class ExpressionSequenceBaker {
     required String stem,
     Map<String, Uint8List>? jpegOverrides,
   }) async {
-    final Directory support = Directory('${exprDir.path}/support');
-    final File metaFile = File('${support.path}/$stem.json');
-    final File jpgFile = File('${support.path}/$stem.jpg');
-    final File vertsFile = File('${support.path}/$stem.verts');
-    if (!metaFile.existsSync() ||
+    final File? metaFile =
+        SessionPath.fileUnderRoot(exprDir, 'support/$stem.json');
+    final File? jpgFile =
+        SessionPath.fileUnderRoot(exprDir, 'support/$stem.jpg');
+    final File? vertsFile =
+        SessionPath.fileUnderRoot(exprDir, 'support/$stem.verts');
+    if (metaFile == null ||
+        jpgFile == null ||
+        vertsFile == null ||
+        !metaFile.existsSync() ||
         !jpgFile.existsSync() ||
         !vertsFile.existsSync()) {
       return null;
@@ -1378,8 +1403,10 @@ List<double> expressionScaleByCenterWeight(List<double> weights) {
   ];
 }
 
-/// Expression clip: scale pose weights by [FaceRegions.sideWeight] (0 = midface,
-/// never take L/R; 1 = outer cheek / temple).
+/// Test helper: scale pose weights by [FaceRegions.sideWeight]
+/// (0 = midface, 1 = outer cheek / temple). Production bake uses
+/// [expressionScaleByCenterWeight] / [expressionSideSupportWeights] instead.
+@visibleForTesting
 List<double> expressionScaleBySideWeight(List<double> weights) {
   const List<double> sw = FaceRegions.sideWeight;
   final int n = weights.length;
@@ -1389,9 +1416,10 @@ List<double> expressionScaleBySideWeight(List<double> weights) {
   ];
 }
 
-/// Smile-clip helper (tests / unused by bake): keep [candidate] only where
-/// other poses barely cover the vertex. Soft-ramps to 0 as coverage approaches
-/// [coverageKill]. Does **not** change 4-pose bake.
+/// Keep [candidate] only where other poses barely cover the vertex.
+/// Soft-ramps to 0 as coverage approaches [coverageKill].
+///
+/// Used by [expressionSideSupportWeights] and [expressionChinUpSupportWeights].
 List<double> expressionChinUpGapWeights({
   required List<double> candidate,
   required List<List<double>> coveredBy,

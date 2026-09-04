@@ -1,12 +1,10 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../application/model_generate_service.dart';
-import '../application/session_white_balance.dart';
 import '../data/arkit_face_tracking_service.dart';
 import '../data/bake/expression_sequence_baker.dart';
 import '../data/bake/session_baker.dart';
@@ -17,6 +15,7 @@ import '../domain/entities/capture_session.dart';
 import '../domain/entities/saved_session.dart';
 import 'obj_model_viewer_page.dart';
 import 'scan_format.dart';
+import 'wb_corrector.dart';
 
 /// Lists files for one saved session; tap opens a preview.
 ///
@@ -82,7 +81,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     }
     unawaited(() async {
       await _load();
-      if (!mounted || !_generate.pendingOpen) {
+      if (!mounted || !_generate.isPendingOpenFor(widget.entry.id)) {
         return;
       }
       switch (kind) {
@@ -214,27 +213,8 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     final ScanStorage storage = ScanStorage(rootDirectory: documents);
     final String? seq = storage.expressionSequenceManifest(widget.entry.id);
 
-    Future<WhiteBalanceCorrection?> wb({
-      required List<Uint8List> jpegs,
-      required bool matchFrontal,
-      required double targetKelvin,
-    }) async {
-      final result = await _native.correctWhiteBalance(
-        jpegs: jpegs,
-        matchFrontal: matchFrontal,
-        targetKelvin: targetKelvin,
-      );
-      if (result == null) {
-        return null;
-      }
-      return WhiteBalanceCorrection(
-        ok: result.ok,
-        jpegs: result.jpegs,
-        targetKelvin: result.targetKelvin,
-        error: result.error,
-        timingSummary: result.timingSummary,
-      );
-    }
+    final ModelGenerateWbCorrector wb =
+        modelGenerateWbCorrector(_native.correctWhiteBalance);
 
     if (seq != null) {
       if (!mounted) {
@@ -245,6 +225,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
       );
       await _generate.generateExpression(
         manifestPath: seq,
+        jobKey: widget.entry.id,
         mlWb: false,
         mlWbMatchFrontal: true,
         fillHoles: true,

@@ -562,8 +562,8 @@ class _ObjModelViewerPageState extends State<ObjModelViewerPage> {
           children: <Widget>[
             Text(
               _paintDirty
-                  ? 'Nächstes Generate folgt der Markierung'
-                  : 'Finger malt · Drehen aus · Auto löscht',
+                  ? 'Next Generate follows this paint'
+                  : 'Finger paints · rotate off · Auto clears',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: onCanvas.withValues(alpha: 0.78),
@@ -579,15 +579,15 @@ class _ObjModelViewerPageState extends State<ObjModelViewerPage> {
                   _brushChip('Clip', SourcePaintLabel.clip.index, const Color(0xFF28C85A)),
                   _brushChip('L', SourcePaintLabel.left.index, const Color(0xFFEB3838)),
                   _brushChip('R', SourcePaintLabel.right.index, const Color(0xFF2E6BF5)),
-                  _brushChip('Kinn', SourcePaintLabel.chin.index, const Color(0xFFFAD028)),
+                  _brushChip('Chin', SourcePaintLabel.chin.index, const Color(0xFFFAD028)),
                   _brushChip('Auto', SourcePaintLabel.auto.index, const Color(0xFFB0B0B0)),
                   TextButton(
                     onPressed: () => unawaited(_clearPaint()),
-                    child: Text('Leeren', style: TextStyle(color: onCanvas)),
+                    child: Text('Clear', style: TextStyle(color: onCanvas)),
                   ),
                   TextButton(
                     onPressed: () => unawaited(_copyPaintIndices()),
-                    child: Text('Verts kopieren', style: TextStyle(color: onCanvas)),
+                    child: Text('Copy verts', style: TextStyle(color: onCanvas)),
                   ),
                 ],
               ),

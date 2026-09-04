@@ -107,6 +107,57 @@ abstract final class SessionPath {
     return Directory(resolved);
   }
 
+  /// True when [absolutePath] resolves under `…/face_scans/<safeSessionId>/…`.
+  ///
+  /// Structural allowlist for absolute bake / delete roots when the caller
+  /// does not pass an explicit [scansRoot] Directory.
+  static bool isUnderFaceScansTree(String absolutePath) {
+    if (absolutePath.isEmpty) {
+      return false;
+    }
+    final List<String> parts = _pathSegments(_canonicalize(absolutePath));
+    final int idx = parts.indexOf('face_scans');
+    if (idx < 0 || idx + 1 >= parts.length) {
+      return false;
+    }
+    return isSafeSessionId(parts[idx + 1]);
+  }
+
+  /// True for `…/face_scans/<safeId>/expression/sequence.json`.
+  static bool isExpressionSequenceManifestPath(String absolutePath) {
+    if (absolutePath.isEmpty) {
+      return false;
+    }
+    final List<String> parts = _pathSegments(_canonicalize(absolutePath));
+    if (parts.length < 4) {
+      return false;
+    }
+    if (parts[parts.length - 1] != 'sequence.json') {
+      return false;
+    }
+    if (parts[parts.length - 2] != 'expression') {
+      return false;
+    }
+    if (parts[parts.length - 4] != 'face_scans') {
+      return false;
+    }
+    return isSafeSessionId(parts[parts.length - 3]);
+  }
+
+  /// Session id from an expression manifest path, or null when unsafe.
+  static String? sessionIdFromExpressionManifest(String absolutePath) {
+    if (!isExpressionSequenceManifestPath(absolutePath)) {
+      return null;
+    }
+    final List<String> parts = _pathSegments(_canonicalize(absolutePath));
+    return parts[parts.length - 3];
+  }
+
+  static List<String> _pathSegments(String path) => path
+      .split(RegExp(r'[/\\]'))
+      .where((String p) => p.isNotEmpty)
+      .toList();
+
   static String _canonicalize(String path) {
     // Prefer real path when the node exists; otherwise normalize lexically.
     try {

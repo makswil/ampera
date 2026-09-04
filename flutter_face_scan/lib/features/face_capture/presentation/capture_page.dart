@@ -12,7 +12,6 @@ import '../application/capture_state.dart';
 import '../application/capture_status.dart';
 import '../application/expression_sequence_bloc.dart';
 import '../application/model_generate_service.dart';
-import '../application/session_white_balance.dart';
 import '../data/arkit_face_tracking_service.dart';
 import '../data/bake/expression_sequence_baker.dart';
 import '../data/bake/session_baker.dart';
@@ -46,6 +45,7 @@ import 'pose_guidance_copy.dart';
 import 'scan_theme.dart';
 import 'scans_manager_page.dart';
 import 'theme_settings.dart';
+import 'wb_corrector.dart';
 import 'widgets/capture_overlay.dart';
 import 'widgets/scan_onboarding_sheet.dart';
 
@@ -401,7 +401,7 @@ class _CapturePageState extends State<CapturePage> {
   }
 
   Future<void> _consumeGenerateResult(ModelGenerateKind kind) async {
-    if (!_generate.pendingOpen) {
+    if (!_generate.isPendingOpenFor(_lastSession?.id)) {
       return;
     }
     switch (kind) {
@@ -747,7 +747,7 @@ class _CapturePageState extends State<CapturePage> {
         setState(() => _platformPreviewVisible = true);
         // Bake may have finished while browsing Saved Scans.
         final ModelGenerateKind? kind = _generate.kind;
-        if (_generate.pendingOpen && kind != null) {
+        if (_generate.isPendingOpenFor(_lastSession?.id) && kind != null) {
           unawaited(_consumeGenerateResult(kind));
         }
       }
@@ -1034,7 +1034,7 @@ class _CapturePageState extends State<CapturePage> {
             SwitchListTile(
               title: const Text('ml-wb (expression clip)'),
               subtitle: const Text(
-                'Default off — all clip frames (slow). L/R/Kinn stills are '
+                'Default off — all clip frames (slow). L/R/Chin stills are '
                 'always matched to one clip frame.',
               ),
               value: _debug.mlWbExpression,
@@ -1079,7 +1079,7 @@ class _CapturePageState extends State<CapturePage> {
           title: const Text('ml-wb (expression clip)'),
           subtitle: const Text(
             'Default off. White-balance every expression-clip frame (slow). '
-            'L/R/Kinn stills are always matched to one clip frame. '
+            'L/R/Chin stills are always matched to one clip frame. '
             'Generate again to apply.',
           ),
           value: _debug.mlWbExpression,
@@ -1321,7 +1321,7 @@ class _CapturePageState extends State<CapturePage> {
     }
     if (mounted) {
       final ModelGenerateKind? kind = _generate.kind;
-      if (_generate.pendingOpen && kind != null) {
+      if (_generate.isPendingOpenFor(_lastSession?.id) && kind != null) {
         unawaited(_consumeGenerateResult(kind));
       }
     }
@@ -1444,6 +1444,7 @@ class _CapturePageState extends State<CapturePage> {
     }
     await _generate.generateExpression(
       manifestPath: manifestPath,
+      jobKey: _lastSession?.id,
       mlWb: _debug.mlWbExpression,
       mlWbMatchFrontal: _debug.mlWbMatchFrontal,
       fillHoles: _debug.fillHoles,
@@ -1452,28 +1453,8 @@ class _CapturePageState extends State<CapturePage> {
     );
   }
 
-  ModelGenerateWbCorrector get _wbCorrector => ({
-        required List<Uint8List> jpegs,
-        required bool matchFrontal,
-        required double targetKelvin,
-      }) async {
-        final WhiteBalanceResult? result =
-            await _trackingService.correctWhiteBalance(
-          jpegs: jpegs,
-          matchFrontal: matchFrontal,
-          targetKelvin: targetKelvin,
-        );
-        if (result == null) {
-          return null;
-        }
-        return WhiteBalanceCorrection(
-          ok: result.ok,
-          jpegs: result.jpegs,
-          targetKelvin: result.targetKelvin,
-          error: result.error,
-          timingSummary: result.timingSummary,
-        );
-      };
+  ModelGenerateWbCorrector get _wbCorrector =>
+      modelGenerateWbCorrector(_trackingService.correctWhiteBalance);
 
   Future<void> _openBakedViewer({
     required String objPath,

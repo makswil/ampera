@@ -42,6 +42,12 @@ final class ModelGenerateService extends ChangeNotifier {
   /// Set when a job finishes successfully while no UI consumed the result yet.
   bool _pendingOpen = false;
 
+  /// Session id (or other stable key) for the in-flight / last finished job.
+  ///
+  /// CapturePage and SessionDetailPage both listen to this singleton — only the
+  /// screen whose [jobKey] matches should open the result.
+  String? _jobKey;
+
   final StreamController<ModelGenerateKind> _completed =
       StreamController<ModelGenerateKind>.broadcast();
 
@@ -51,7 +57,12 @@ final class ModelGenerateService extends ChangeNotifier {
   BakedTexture? get sessionResult => _sessionResult;
   ExpressionSequenceBakeResult? get expressionResult => _expressionResult;
   bool get pendingOpen => _pendingOpen;
+  String? get jobKey => _jobKey;
   Stream<ModelGenerateKind> get completed => _completed.stream;
+
+  /// True when a finished job is waiting and belongs to [key].
+  bool isPendingOpenFor(String? key) =>
+      _pendingOpen && key != null && key.isNotEmpty && _jobKey == key;
 
   Future<void> generateSession({
     required CaptureSession session,
@@ -73,6 +84,7 @@ final class ModelGenerateService extends ChangeNotifier {
     }
     _running = true;
     _kind = ModelGenerateKind.session;
+    _jobKey = session.id;
     _error = null;
     _sessionResult = null;
     _pendingOpen = false;
@@ -136,6 +148,8 @@ final class ModelGenerateService extends ChangeNotifier {
 
   Future<void> generateExpression({
     required String manifestPath,
+    /// Stable key for UI result routing (usually the session id).
+    String? jobKey,
     required bool mlWb,
     required bool mlWbMatchFrontal,
     required bool fillHoles,
@@ -147,8 +161,16 @@ final class ModelGenerateService extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    if (!SessionPath.isExpressionSequenceManifestPath(manifestPath)) {
+      _error = 'Unsafe expression manifest path';
+      notifyListeners();
+      return;
+    }
     _running = true;
     _kind = ModelGenerateKind.expression;
+    _jobKey = jobKey ??
+        SessionPath.sessionIdFromExpressionManifest(manifestPath) ??
+        manifestPath;
     _error = null;
     _expressionResult = null;
     _pendingOpen = false;
@@ -249,6 +271,9 @@ Future<({Map<String, Uint8List>? overrides, String note})>
   required bool matchFrontal,
   required ModelGenerateWbCorrector correct,
 }) async {
+  if (!SessionPath.isExpressionSequenceManifestPath(manifestPath)) {
+    return (overrides: null, note: 'ml-wb: unsafe manifest path');
+  }
   final File manifestFile = File(manifestPath);
   if (!manifestFile.existsSync()) {
     return (overrides: null, note: 'ml-wb: no manifest');
@@ -319,6 +344,9 @@ Future<({Map<String, Uint8List>? overrides, String note})>
   required String manifestPath,
   required ModelGenerateWbCorrector correct,
 }) async {
+  if (!SessionPath.isExpressionSequenceManifestPath(manifestPath)) {
+    return (overrides: null, note: 'ml-wb support: unsafe manifest path');
+  }
   final File manifestFile = File(manifestPath);
   if (!manifestFile.existsSync()) {
     return (overrides: null, note: 'ml-wb support: no manifest');
@@ -356,10 +384,9 @@ Future<({Map<String, Uint8List>? overrides, String note})>
   const List<String> stems = <String>['right40', 'left40', 'up'];
   final List<String> supportNames = <String>[];
   final List<Uint8List> inputs = <Uint8List>[await clipFile.readAsBytes()];
-  final Directory supportDir = Directory('${exprDir.path}/support');
   for (final String stem in stems) {
-    final File jpg = File('${supportDir.path}/$stem.jpg');
-    if (!jpg.existsSync()) {
+    final File? jpg = SessionPath.fileUnderRoot(exprDir, 'support/$stem.jpg');
+    if (jpg == null || !jpg.existsSync()) {
       continue;
     }
     supportNames.add('$stem.jpg');

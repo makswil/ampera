@@ -92,4 +92,57 @@ void main() {
       expect(SessionPath.sessionDirectory(tempDir, 'ok_id'), isNotNull);
     });
   });
+
+  group('SessionPath face_scans absolute allowlist', () {
+    test('isUnderFaceScansTree requires face_scans/<safeId>', () {
+      expect(
+        SessionPath.isUnderFaceScansTree(
+          '/tmp/docs/face_scans/session_1/expression',
+        ),
+        isTrue,
+      );
+      expect(
+        SessionPath.isUnderFaceScansTree('/tmp/docs/other/session_1'),
+        isFalse,
+      );
+      expect(
+        SessionPath.isUnderFaceScansTree('/tmp/docs/face_scans/../etc'),
+        isFalse,
+      );
+    });
+
+    test('isExpressionSequenceManifestPath checks layout', () {
+      expect(
+        SessionPath.isExpressionSequenceManifestPath(
+          '/tmp/docs/face_scans/session_1/expression/sequence.json',
+        ),
+        isTrue,
+      );
+      expect(
+        SessionPath.isExpressionSequenceManifestPath(
+          '/tmp/docs/face_scans/session_1/sequence.json',
+        ),
+        isFalse,
+      );
+      expect(
+        SessionPath.isExpressionSequenceManifestPath(
+          '/tmp/docs/face_scans/../evil/expression/sequence.json',
+        ),
+        isFalse,
+      );
+    });
+
+    test('sessionIdFromExpressionManifest extracts id', () {
+      expect(
+        SessionPath.sessionIdFromExpressionManifest(
+          '/tmp/docs/face_scans/session_abc/expression/sequence.json',
+        ),
+        'session_abc',
+      );
+      expect(
+        SessionPath.sessionIdFromExpressionManifest('/tmp/x/sequence.json'),
+        isNull,
+      );
+    });
+  });
 }
